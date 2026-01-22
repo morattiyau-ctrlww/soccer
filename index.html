@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Penalty Shootout</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="game-container">
+        <div class="field">
+            <div class="goal-area">
+                <div class="goal-post left-post"></div>
+                <div class="goal-post right-post"></div>
+                <div class="goal-post top-post"></div>
+                <div class="goal-net"></div>
+                
+                <div class="goalkeeper" id="goalkeeper">
+                    <div class="keeper-head"></div>
+                    <div class="keeper-gloves">
+                        <div class="glove left-glove"></div>
+                        <div class="glove right-glove"></div>
+                    </div>
+                    <div class="keeper-arms">
+                        <div class="arm left-arm"></div>
+                        <div class="arm right-arm"></div>
+                    </div>
+                    <div class="keeper-body"></div>
+                    <div class="keeper-legs">
+                        <div class="leg left-leg"></div>
+                        <div class="leg right-leg"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="penalty-spot">
+                <div class="ball" id="ball"></div>
+            </div>
+            
+            <div class="shooting-zones">
+                <div class="zone left-zone" data-direction="left">
+                    <span>LEFT</span>
+                </div>
+                <div class="zone middle-zone" data-direction="middle">
+                    <span>MIDDLE</span>
+                </div>
+                <div class="zone right-zone" data-direction="right">
+                    <span>RIGHT</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="ui">
+            <div class="score">
+                <div class="score-item">
+                    <span>Goals:</span>
+                    <span id="goals">0</span>
+                </div>
+                <div class="score-item">
+                    <span>Attempts:</span>
+                    <span id="attempts">0</span>
+                </div>
+            </div>
+            
+            <div class="instructions">
+                <p>Click LEFT, MIDDLE, or RIGHT to shoot!</p>
+                <p>Beat the goalkeeper and score goals!</p>
+            </div>
+            
+            <div class="result" id="result"></div>
+        </div>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>
