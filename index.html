@@ -1,76 +1,68 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Penalty Shootout</title>
-    <link rel="stylesheet" href="style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Penalty Shootout 十二碼大戰</title>
+<meta name="description" content="A skill-based 3D penalty shootout — aim, power, keeper AI.">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="game-container">
-        <div class="field">
-            <div class="goal-area">
-                <div class="goal-post left-post"></div>
-                <div class="goal-post right-post"></div>
-                <div class="goal-post top-post"></div>
-                <div class="goal-net"></div>
-                
-                <div class="goalkeeper" id="goalkeeper">
-                    <div class="keeper-head"></div>
-                    <div class="keeper-gloves">
-                        <div class="glove left-glove"></div>
-                        <div class="glove right-glove"></div>
-                    </div>
-                    <div class="keeper-arms">
-                        <div class="arm left-arm"></div>
-                        <div class="arm right-arm"></div>
-                    </div>
-                    <div class="keeper-body"></div>
-                    <div class="keeper-legs">
-                        <div class="leg left-leg"></div>
-                        <div class="leg right-leg"></div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="penalty-spot">
-                <div class="ball" id="ball"></div>
-            </div>
-            
-            <div class="shooting-zones">
-                <div class="zone left-zone" data-direction="left">
-                    <span>LEFT</span>
-                </div>
-                <div class="zone middle-zone" data-direction="middle">
-                    <span>MIDDLE</span>
-                </div>
-                <div class="zone right-zone" data-direction="right">
-                    <span>RIGHT</span>
-                </div>
-            </div>
-        </div>
-        
-        <div class="ui">
-            <div class="score">
-                <div class="score-item">
-                    <span>Goals:</span>
-                    <span id="goals">0</span>
-                </div>
-                <div class="score-item">
-                    <span>Attempts:</span>
-                    <span id="attempts">0</span>
-                </div>
-            </div>
-            
-            <div class="instructions">
-                <p>Click LEFT, MIDDLE, or RIGHT to shoot!</p>
-                <p>Beat the goalkeeper and score goals!</p>
-            </div>
-            
-            <div class="result" id="result"></div>
-        </div>
+<div id="stage">
+  <canvas id="pitch" aria-label="Penalty shootout game area"></canvas>
+
+  <header class="hud hud-top">
+    <div class="brand">
+      <span class="ball-ico"></span>
+      <div>
+        <b>Penalty Shootout</b>
+        <small>十二碼大戰</small>
+      </div>
     </div>
-    
-    <script src="script.js"></script>
+
+    <div class="chips">
+      <div class="chip"><span>Round</span><b id="hud-round">1/5</b></div>
+      <div class="chip"><span>Goals</span><b id="hud-goals">0</b></div>
+      <div class="chip"><span>Streak</span><b id="hud-streak">0</b></div>
+      <div class="chip"><span>Best</span><b id="hud-best">0</b></div>
+    </div>
+
+    <div class="tools">
+      <select id="difficulty" aria-label="Difficulty">
+        <option value="easy">Easy 易</option>
+        <option value="normal" selected>Normal 普通</option>
+        <option value="hard">Hard 難</option>
+        <option value="legend">Legend 傳說</option>
+      </select>
+      <button id="sound" class="icon-btn" aria-pressed="true" title="Sound">🔊</button>
+      <button id="restart" class="icon-btn" title="Restart">↻</button>
+    </div>
+  </header>
+
+  <footer class="hud hud-bottom">
+    <div class="hint" id="hint">
+      Move to aim · <b>Hold</b> to power up · <b>Release</b> to shoot
+      <span class="cn">移動瞄準 · 按住儲力 · 放手射門</span>
+    </div>
+    <div class="power-wrap" id="power-wrap">
+      <div class="power-bar"><i id="power-fill"></i><span class="sweet"></span></div>
+      <div class="power-label" id="power-label">POWER</div>
+    </div>
+  </footer>
+
+  <div class="shots" id="shots" aria-label="Shot results"></div>
+
+  <div class="banner" id="banner" role="status"></div>
+
+  <div class="overlay" id="overlay">
+    <div class="card">
+      <h2 id="ov-title">Full Time</h2>
+      <p id="ov-sub"></p>
+      <div class="ov-stats" id="ov-stats"></div>
+      <button class="primary" id="again">Play again 再玩一次</button>
+    </div>
+  </div>
+</div>
+<script src="script.js"></script>
 </body>
 </html>
