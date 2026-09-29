@@ -75,7 +75,7 @@ select:hover,.icon-btn:hover{border-color:rgba(56,239,125,.5)}
 
 .shots{position:absolute; left:50%; transform:translateX(-50%); bottom:74px;
   display:flex; gap:7px; z-index:5; pointer-events:none}
-.shots{bottom:104px}
+.shots{bottom:150px}
 .shots i{width:12px; height:12px; border-radius:50%;
   background:rgba(255,255,255,.16); border:1px solid rgba(255,255,255,.3);
   transition:transform .2s ease}
@@ -124,6 +124,34 @@ select:hover,.icon-btn:hover{border-color:rgba(56,239,125,.5)}
   font:inherit; font-size:15px; font-weight:800; color:#04160c; cursor:pointer;
   background:linear-gradient(135deg,#38ef7d,#11998e)}
 .primary:hover{filter:brightness(1.07)}
+
+/* ---------- the AI readout: what the keeper currently believes ---------- */
+.ai{position:absolute; left:50%; transform:translateX(-50%); top:86px; z-index:6;
+  display:flex; align-items:center; gap:9px; padding:6px 14px;
+  background:rgba(6,14,11,.62); border:1px solid rgba(56,239,125,.28);
+  border-radius:999px; backdrop-filter:blur(10px);
+  font-size:12.5px; color:var(--muted); pointer-events:none;
+  max-width:min(92vw,620px); white-space:nowrap; overflow:hidden}
+.ai b{display:flex; align-items:center; gap:6px; font-size:10.5px;
+  letter-spacing:.13em; color:var(--brand); font-weight:800}
+.ai .dot{width:7px; height:7px; border-radius:50%; background:var(--brand);
+  box-shadow:0 0 8px var(--brand); animation:pulse 1.4s ease-in-out infinite}
+.ai span{color:#e8f6ee; font-variant-numeric:tabular-nums}
+.ai.hot{border-color:rgba(255,150,80,.55)}
+.ai.hot b{color:#ffab63}
+.ai.hot .dot{background:#ffab63; box-shadow:0 0 8px #ffab63}
+@keyframes pulse{0%,100%{opacity:1} 50%{opacity:.35}}
+
+/* ---------- stadium loading splash ---------- */
+.splash{position:absolute; left:50%; bottom:26px; transform:translateX(-50%);
+  z-index:8; display:none; align-items:center; gap:9px;
+  background:var(--panel); border:1px solid var(--line); border-radius:999px;
+  padding:8px 16px; font-size:12.5px; color:var(--muted);
+  backdrop-filter:blur(10px)}
+.splash.on{display:flex; animation:fade .25s ease}
+.splash i{width:11px; height:11px; border-radius:50%; flex:0 0 11px;
+  border:2px solid rgba(56,239,125,.25); border-top-color:var(--brand);
+  animation:spin .8s linear infinite}
 
 /* ---------- responsive ---------- */
 @media (max-width:720px){

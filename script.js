@@ -19,17 +19,30 @@ var CFG = {
   SWEET_WINDOW: 0.12,
   AIM_H: 1.0,           /* 1.0 = crossbar height */
   FLIGHT: 0.62,         /* seconds of ball flight (multiplied by shot speed) */
-  REACH_Y: 1.0
+  REACH_Y: 1.0,
+
+  /* Real geometry, in metres. world.js must agree — there is a test for it.  */
+  GOAL_W: 7.32, GOAL_H: 2.44, POST_R: 0.06, BALL_R: 0.11
 };
+/* The woodwork band is a real collision, not a magic number: it is the post
+   radius plus the ball radius, expressed in goal units. A shot counts as off
+   the frame exactly when the ball's surface would touch it — so the band you
+   see on screen is the band that counts.                                    */
+CFG.WOOD = { x: (CFG.POST_R + CFG.BALL_R) / (CFG.GOAL_W / 2),
+             y: (CFG.POST_R + CFG.BALL_R) / CFG.GOAL_H };
 
 /* Difficulty. Bigger reach / faster reaction / more anticipation = better
    keeper. reachX is the keeper's horizontal cover in goal units, reachY the
    vertical cover; react = seconds before he commits.                      */
 var DIFF = {
-  easy:   { react: 0.34, reachX: 0.26, reachY: 0.30, anticipate: 0.15, speed: 0.9 },
-  normal: { react: 0.24, reachX: 0.38, reachY: 0.38, anticipate: 0.30, speed: 1.0 },
-  hard:   { react: 0.16, reachX: 0.50, reachY: 0.45, anticipate: 0.44, speed: 1.1 },
-  legend: { react: 0.11, reachX: 0.62, reachY: 0.52, anticipate: 0.58, speed: 1.2 }
+  easy:   { react: 0.34, reachX: 0.26, reachY: 0.30, anticipate: 0.15,
+            speed: 0.9, learn: 0.12 },
+  normal: { react: 0.24, reachX: 0.38, reachY: 0.38, anticipate: 0.30,
+            speed: 1.0, learn: 0.34 },
+  hard:   { react: 0.16, reachX: 0.50, reachY: 0.45, anticipate: 0.44,
+            speed: 1.1, learn: 0.62 },
+  legend: { react: 0.11, reachX: 0.62, reachY: 0.52, anticipate: 0.58,
+            speed: 1.2, learn: 1.00 }
 };
 
 /* ============================== LOGIC ==================================== */
@@ -47,29 +60,105 @@ var LOGIC = (function(){
     return (rnd() * 2 - 1) * (wobble + 0.008);
   }
 
+  /* ------------------------------------------------------------------------
+     THE READER
+     The keeper keeps a belief over a 3x3 grid of the goal mouth — nine little
+     boxes he can dive into. Every shot you take nudges that belief, harder
+     difficulties learn faster, and the belief is what he commits from. The
+     game shows you the belief, so you can bait him and he can learn you.
+     ------------------------------------------------------------------------ */
+  var ZONES = {
+    cols: [-0.68, 0, 0.68],          /* left / centre / right, in goal units */
+    rows: [0.14, 0.50, 0.84],        /* low / middle / high                  */
+    /* what an unread taker looks like: corners and low shots are where
+       penalties actually go, which is the prior he starts from            */
+    prior: [
+      [0.11, 0.06, 0.10],
+      [0.14, 0.09, 0.14],
+      [0.10, 0.14, 0.12]
+    ]
+  };
+
+  function colOf(x){ return x < -0.30 ? 0 : (x > 0.30 ? 2 : 1); }
+  function rowOf(y){ return y < 0.34 ? 0 : (y > 0.68 ? 2 : 1); }
+
+  /* The belief, as a normalised 3x3 matrix. Recency-weighted, learning rate
+     by difficulty, and it forgets: your last eight penalties only.          */
+  function gridWeights(history, diff){
+    var d = DIFF[diff] || DIFF.normal;
+    var w = [[0,0,0],[0,0,0],[0,0,0]];
+    var r, c, sum = 0;
+    for (r = 0; r < 3; r++){
+      for (c = 0; c < 3; c++){
+        w[r][c] = ZONES.prior[r][c];
+        sum += w[r][c];
+      }
+    }
+    var n = history ? history.length : 0;
+    for (var i = n - 1; i >= 0 && i >= n - 8; i--){
+      /* 0.62 per shot: he has a memory, not a grudge — old penalties fade */
+      var rec = Math.pow(0.62, n - 1 - i);
+      w[rowOf(history[i].y)][colOf(history[i].x)] += (d.learn || 0.3) * rec * 0.5;
+    }
+    sum = 0;
+    for (r = 0; r < 3; r++) for (c = 0; c < 3; c++) sum += w[r][c];
+    for (r = 0; r < 3; r++) for (c = 0; c < 3; c++) w[r][c] /= sum;
+    return w;
+  }
+
+  /* the box he believes in most, with its probability */
+  function bestCell(w){
+    var br = 1, bc = 1, bp = -1;
+    for (var r = 0; r < 3; r++){
+      for (var c = 0; c < 3; c++){
+        if (w[r][c] > bp){ bp = w[r][c]; br = r; bc = c; }
+      }
+    }
+    return { r: br, c: bc, p: bp, x: ZONES.cols[bc], y: ZONES.rows[br] };
+  }
+
+  /* draw a box from the belief — this is the keeper "deciding" */
+  function sampleCell(w, rnd){
+    var total = 0, r, c;
+    for (r = 0; r < 3; r++) for (c = 0; c < 3; c++) total += w[r][c];
+    var t = rnd() * total;
+    for (r = 0; r < 3; r++){
+      for (c = 0; c < 3; c++){
+        t -= w[r][c];
+        if (t <= 0) return { r: r, c: c };
+      }
+    }
+    return { r: 1, c: 1 };
+  }
+
   /* The keeper commits before he can see the shot (like a real penalty). */
   function keeperPlan(history, diff, rnd){
     rnd = rnd || Math.random;
     var d = DIFF[diff] || DIFF.normal;
+    var heat = gridWeights(history, diff);
     var read = rnd() < d.anticipate && history.length > 0;
-    var dir;
-    if (read){
-      /* weight the taker's last four shots to find a tell */
-      var sum = 0, w = 1;
-      for (var i = history.length - 1; i >= 0 && i >= history.length - 4; i--){
-        sum += history[i].x * w; w *= 0.7;
-      }
-      dir = Math.abs(sum) < 0.15 ? pick([-1, 0, 1]) : (sum > 0 ? 1 : -1);
-    } else {
-      dir = pick([-1, 0, 1]);
-    }
-    /* keepers guess low more often than high */
-    var heightPlans = d.reachY > 0.4 ? [0.10, 0.30, 0.62, 0.85]
-                                     : [0.12, 0.34, 0.70];
-    var h = pick(heightPlans);
+    var cell = read ? sampleCell(heat, rnd) : sampleCell(ZONES.prior, rnd);
+    var dir = cell.c === 0 ? -1 : (cell.c === 2 ? 1 : 0);
+    /* the box he chose sets the side; the exact spot inside it is still a dive
+       he has to actually make */
     var x = dir === 0 ? rand(-0.12, 0.12) : dir * rand(0.52, 0.80);
+    var h = clamp(ZONES.rows[cell.r] + rand(-0.08, 0.08), 0.08, 0.95);
     return { x: x, y: h, dir: dir, height: h, read: read,
+             expect: bestCell(heat), heat: heat,
              react: d.react * rand(0.85, 1.2) };
+  }
+
+  /* How much goal the keeper covers for a given shot power (goal units).
+     One function, so the rules, the 3D keeper and the on-screen "reach" the
+     player is shown can never drift apart.                                  */
+  function reachAt(diff, power){
+    var d = DIFF[diff] || DIFF.normal;
+    power = clamp(power, 0, 1);
+    /* A hard shot shrinks the keeper's window; a soft one invites a save. */
+    var speedFactor = 1.25 - 0.55 * power;
+    var slow = power < 0.42 ? 1.30 : 1.0;
+    return { x: d.reachX * speedFactor * slow,
+             y: d.reachY * CFG.REACH_Y * speedFactor * slow };
   }
 
   /* Resolve the shot: where it crosses the line, and what happens. */
@@ -81,34 +170,31 @@ var LOGIC = (function(){
     var ex = shotError(power, rnd);
     var ey = shotError(power, rnd) * 0.55;
     var x = clamp(aim.x + ex, -1.45, 1.45);
-    var y = clamp(aim.y + ey - Math.max(0, power - CFG.SWEET) * 0.10, -0.2, 1.6);
+    var y = clamp(aim.y + ey - Math.max(0, power - CFG.SWEET) * 0.10, 0, 1.6);
     var speed = lerp(1.35, 0.72, power);         /* 0..1 flight-time scale  */
 
     var verdict = 'goal', hit = null;
+    var reach = reachAt(diff, power);
+    var ax = Math.abs(x), ay = Math.abs(y);
 
-    /* woodwork */
-    var postHit = Math.abs(Math.abs(x) - 1.0) <= 0.075;
-    var barHit = Math.abs(Math.abs(y) - CFG.AIM_H) <= 0.075;
-    if (Math.abs(x) > 1.0 && postHit){ verdict = 'post'; hit = 'post'; }
-    else if (Math.abs(y) > CFG.AIM_H && barHit){ verdict = 'post'; hit = 'bar'; }
-    else if (Math.abs(x) > 1.06){ verdict = 'wide'; }
-    else if (Math.abs(y) > CFG.AIM_H){ verdict = 'over'; }
-    else {
-      /* A hard shot shrinks the keeper's window; a soft one invites a save. */
-      var speedFactor = 1.25 - 0.55 * power;
-      var slow = power < 0.42 ? 1.30 : 1.0;
-      var rx = d.reachX * speedFactor * slow;
-      var ry = d.reachY * CFG.REACH_Y * speedFactor * slow;
+    if (ax > 1.0 || ay > CFG.AIM_H){
+      /* Missing the goal: it only counts as woodwork if the ball's surface
+         still touches the frame. Beyond that it is simply wide or over.     */
+      var onPost = ax > 1.0 && ax - 1.0 <= CFG.WOOD.x;
+      var onBar  = ay > CFG.AIM_H && ay - CFG.AIM_H <= CFG.WOOD.y;
+      if (onPost || onBar){ verdict = 'post'; hit = onPost ? 'post' : 'bar'; }
+      else { verdict = ax > 1.0 ? 'wide' : 'over'; }
+    } else {
       var dx = Math.abs(x - keeper.x);
       var dy = Math.abs(y - keeper.y);
-      if (dx <= rx && dy <= ry){
+      if (dx <= reach.x && dy <= reach.y){
         verdict = 'saved';
         hit = y < 0.35 ? 'low' : (y > 0.95 ? 'high' : 'mid');
       }
     }
 
     return { x: x, y: y, verdict: verdict, hit: hit, power: power,
-             speed: speed,
+             speed: speed, reach: reach,
              accuracy: 1 - (Math.abs(ex) + Math.abs(ey)) / 0.2 };
   }
 
@@ -128,7 +214,9 @@ var LOGIC = (function(){
     return 'STICK TO DEFENDING 練多啲';
   }
 
-  return { shotError: shotError, keeperPlan: keeperPlan,
+  return { shotError: shotError, keeperPlan: keeperPlan, reachAt: reachAt,
+           gridWeights: gridWeights, bestCell: bestCell, ZONES: ZONES,
+           colOf: colOf, rowOf: rowOf,
            resolveShot: resolveShot, playRound: playRound, rating: rating };
 })();
 
@@ -239,6 +327,8 @@ function grabDom(){
   D.soundBtn = document.getElementById('sound');
   D.restart = document.getElementById('restart');
   D.hint = document.getElementById('hint');
+  D.ai = document.getElementById('ai');
+  D.aiText = document.getElementById('ai-text');
 }
 
 /* -------------------------------- state --------------------------------- */
@@ -253,6 +343,7 @@ var S = {
   goals: 0,
   streak: 0,
   best: 0,
+  readHits: 0,
   history: [],
   results: [],
   plan: null,
@@ -263,7 +354,11 @@ var S = {
   fx: [],
   shake: 0,
   time: 0,
-  reduce: false
+  reduce: false,
+  /* the 3D renderer drops to slow motion for the aftermath; the game just
+     multiplies its timestep by this, so the rules stay in one place */
+  timeScale: 1,
+  wait: 0
 };
 
 /* ------------------------------- input ---------------------------------- */
@@ -273,14 +368,24 @@ function pointerToAim(cx, cy){
   var ny = (g.goalBottomY - cy) / g.goalH;
   /* distance between the ball and the goal line compresses the vertical
      pointer range, so aiming feels the same at any screen size          */
+  /* the goal has no gap under it: you can aim along the grass, not below it  */
   S.aim.x = clamp(nx, -1.3, 1.3);
-  S.aim.y = clamp(ny, -0.15, 1.35);
+  S.aim.y = clamp(ny, 0, 1.35);
 }
 
 function bindInput(){
   var cv = D.canvas;
 
+  /* The pointer listeners live on the window, not on a canvas: that way the
+     2D canvas can be switched off when the 3D renderer takes over, and the
+     HUD stays clickable without also firing a shot. */
+  function isUi(target){
+    return !!(target && target.closest &&
+              target.closest('.hud, .overlay, .tools, .badge, button, select'));
+  }
+
   function down(e){
+    if (isUi(e.target)) return;
     if (S.busy || S.phase === 'over') return;
     Sound.wake();
     pointerToAim(e.clientX, e.clientY);
@@ -291,7 +396,6 @@ function bindInput(){
     }
   }
   function move(e){
-    if (S.busy) return;
     pointerToAim(e.clientX, e.clientY);
   }
   function up(){
@@ -301,11 +405,13 @@ function bindInput(){
     shootPenalty();
   }
 
-  cv.addEventListener('pointerdown', down);
-  cv.addEventListener('pointermove', move);
+  window.addEventListener('pointerdown', down);
+  window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', up);
   window.addEventListener('pointercancel', up);
-  cv.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+  window.addEventListener('contextmenu', function(e){
+    if (!isUi(e.target)) e.preventDefault();
+  });
 
   /* keyboard: arrows aim, hold space = power, release = shoot */
   window.addEventListener('keydown', function(e){
@@ -313,8 +419,8 @@ function bindInput(){
     var k = e.key;
     if (k === 'ArrowLeft'){ S.aim.x = clamp(S.aim.x - 0.06, -1.3, 1.3); }
     else if (k === 'ArrowRight'){ S.aim.x = clamp(S.aim.x + 0.06, -1.3, 1.3); }
-    else if (k === 'ArrowUp'){ S.aim.y = clamp(S.aim.y + 0.06, -0.15, 1.35); }
-    else if (k === 'ArrowDown'){ S.aim.y = clamp(S.aim.y - 0.06, -0.15, 1.35); }
+    else if (k === 'ArrowUp'){ S.aim.y = clamp(S.aim.y + 0.06, 0, 1.35); }
+    else if (k === 'ArrowDown'){ S.aim.y = clamp(S.aim.y - 0.06, 0, 1.35); }
     else if (k === ' '){
       e.preventDefault();
       if (!S.charging){ Sound.wake(); S.charging = true; S.phase = 'charging';
@@ -330,6 +436,9 @@ function bindInput(){
 }
 /* --------------------------- round / game flow -------------------------- */
 function geometry(){
+  /* when the stadium is on, ask the camera where the goal is on screen, so
+     the pointer maps onto the 3D goal exactly */
+  if (Renderer3D && Renderer3D.active()) return Renderer3D.geometry();
   var W = D.canvas.clientWidth, H = D.canvas.clientHeight;
   var goalHalf = Math.min(W * 0.27, H * 0.46);
   var goalBottomY = H * 0.70;
@@ -418,14 +527,25 @@ function endShot(){
   showBanner(label, cn, cls);
   renderShots();
   updateHud(true);
+  if (v === 'saved' && S.plan && S.plan.read) S.readHits++;
+  updateAiHud();
 
-  setTimeout(function(){
-    S.busy = false;
-    if (S.shotIndex >= CFG.ROUNDS){ finishGame(); }
-    else { S.phase = 'aim'; S.shot = null; S.plan = null;
-           S.keeper.pose = 'idle'; S.best = Math.max(S.best, S.streak);
-           saveBest(); }
-  }, S.reduce ? 620 : 1150);
+  /* The round does not advance on a wall clock — it advances on the
+     simulation, so the slow-motion aftermath and any fast-forward stay
+     coherent with everything the rules decided. */
+  S.phase = 'result';
+  S.wait = S.reduce ? 0.7 : 1.0;
+}
+
+function nextRound(){
+  S.busy = false;
+  if (S.shotIndex >= CFG.ROUNDS){ finishGame(); }
+  else {
+    S.phase = 'aim'; S.shot = null; S.plan = null;
+    S.keeper.pose = 'idle'; S.best = Math.max(S.best, S.streak);
+    if (Renderer3D && Renderer3D.active()) Renderer3D.reset();
+    saveBest();
+  }
 }
 
 function netImpactPoint(){
@@ -471,6 +591,47 @@ function updateHud(pump){
   }
 }
 
+/* ------------------------------ the AI read ------------------------------
+   The keeper's belief, in words. It is the same distribution the 3D overlay
+   draws and the same one his dive is sampled from, so the readout can never
+   flatter him: what you read on screen is what he is actually thinking.     */
+var AI_COLS = ['left', 'centre', 'right'];
+var AI_ROWS = ['low', 'middle', 'high'];
+var aiLast = '';
+
+function aiInfo(){
+  var w = LOGIC.gridWeights(S.history, S.diff);
+  var b = LOGIC.bestCell(w);
+  return { heat: w, best: b,
+           where: AI_ROWS[b.r] + '-' + AI_COLS[b.c],
+           pct: Math.round(b.p * 100) };
+}
+
+function updateAiHud(){
+  if (!D.aiText) return;
+  var info = aiInfo();
+  var txt, hot = info.best.p > 0.30;
+  if (S.phase === 'result' && S.shot && S.plan){
+    var v = S.shot.verdict;
+    var how = S.plan.read ? 'he read you' : 'he guessed';
+    if (v === 'goal') txt = 'you beat him — ' + how;
+    else if (v === 'saved') txt = 'READ YOU — saved ' + info.where;
+    else txt = v + ' — ' + how;
+  } else if (S.phase === 'over'){
+    txt = 'full time · he read you ' + S.readHits + '/' + S.results.length;
+  } else if (S.history.length === 0){
+    txt = 'expects ' + info.where + ' from an unknown taker';
+  } else {
+    txt = 'expects ' + info.where + ' · ' + info.pct + '% · ' +
+          S.history.length + ' shot' + (S.history.length === 1 ? '' : 's') + ' learned';
+  }
+  if (txt !== aiLast){
+    aiLast = txt;
+    D.aiText.textContent = txt;
+    if (D.ai) D.ai.className = 'ai' + (hot ? ' hot' : '');
+  }
+}
+
 function renderShots(){
   var html = '';
   for (var i = 0; i < CFG.ROUNDS; i++){
@@ -512,14 +673,17 @@ function finishGame(){
 function newGame(){
   S.shotIndex = 0; S.goals = 0; S.streak = 0;
   S.results = []; S.history = []; S.fx = [];
+  S.readHits = 0; aiLast = '';
   S.busy = false; S.charging = false; S.power = 0;
   S.phase = 'aim'; S.shot = null; S.plan = null;
   S.flight.t = 0; S.flight.done = false;
+  S.wait = 0; S.timeScale = 1;
   S.keeper.pose = 'idle'; S.keeper.x = 0; S.keeper.y = 0.30;
   S.aim = { x: 0, y: 0.34 };
   var g0 = geometry();
   S.ball.x = g0.cx; S.ball.y = g0.ballRestY;
   S.ball.trail.length = 0;
+  if (Renderer3D && Renderer3D.active()) Renderer3D.reset();
   D.overlay.classList.remove('show');
   D.banner.className = 'banner';
   D.powerWrap.classList.remove('on');
@@ -571,353 +735,199 @@ function updateFx(dt){
 }
 
 /* -------------------------------- resize -------------------------------- */
-var CROWD = [];
 function resize(){
   var cv = D.canvas;
   var dpr = Math.min(window.devicePixelRatio || 1, 2);
   var w = Math.max(1, cv.clientWidth), h = Math.max(1, cv.clientHeight);
   cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
   D.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  CROWD.length = 0;
-  var n = clamp(Math.round(w / 9), 60, 190);
-  for (var i = 0; i < n; i++){
-    CROWD.push({ x: Math.random(), y: Math.random(), ph: Math.random() * 6.28,
-                 s: rand(1.6, 3.4), hot: Math.random() < 0.18 });
-  }
-}
-
-/* ------------------------------ background ------------------------------ */
-function drawSky(g){
-  var c = D.ctx;
-  var sky = c.createLinearGradient(0, 0, 0, g.goalBottomY * 1.1);
-  sky.addColorStop(0, '#04060c');
-  sky.addColorStop(0.55, '#0a1626');
-  sky.addColorStop(1, '#123a2a');
-  c.fillStyle = sky;
-  c.fillRect(0, 0, g.W, g.goalBottomY * 1.15);
-
-  /* floodlights */
-  [[0.12, 0.10], [0.88, 0.10], [0.3, 0.05], [0.7, 0.05]].forEach(function(l){
-    var x = l[0] * g.W, y = l[1] * g.H;
-    var rad = c.createRadialGradient(x, y, 0, x, y, g.W * 0.28);
-    rad.addColorStop(0, 'rgba(190,225,255,.34)');
-    rad.addColorStop(0.4, 'rgba(150,200,255,.10)');
-    rad.addColorStop(1, 'rgba(0,0,0,0)');
-    c.fillStyle = rad; c.beginPath(); c.arc(x, y, g.W * 0.28, 0, 6.29); c.fill();
-    c.fillStyle = '#dff0ff';
-    c.fillRect(x - g.W * 0.035, y - 4, g.W * 0.07, 8);
-  });
-}
-
-function drawCrowd(g, time){
-  var c = D.ctx, bandTop = g.H * 0.06, bandBot = g.H * 0.235;
-  var grd = c.createLinearGradient(0, bandTop, 0, bandBot);
-  grd.addColorStop(0, '#0b1524'); grd.addColorStop(1, '#16233a');
-  c.fillStyle = grd; c.fillRect(0, bandTop, g.W, bandBot - bandTop);
-  for (var i = 0; i < CROWD.length; i++){
-    var d = CROWD[i];
-    var tw = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(time * 2.2 + d.ph));
-    c.fillStyle = d.hot ? 'rgba(255,209,102,' + (0.30 * tw).toFixed(2) + ')'
-                        : 'rgba(190,210,255,' + (0.22 * tw).toFixed(2) + ')';
-    c.beginPath();
-    c.arc(d.x * g.W, bandTop + d.y * (bandBot - bandTop), d.s, 0, 6.29);
-    c.fill();
-  }
-}
-
-function drawBoards(g){
-  var c = D.ctx, y = g.H * 0.235, h = g.H * 0.052;
-  var grd = c.createLinearGradient(0, y, 0, y + h);
-  grd.addColorStop(0, '#0d1a2e'); grd.addColorStop(1, '#081120');
-  c.fillStyle = grd; c.fillRect(0, y, g.W, h);
-  c.strokeStyle = 'rgba(120,200,255,.18)'; c.lineWidth = 1;
-  c.beginPath(); c.moveTo(0, y); c.lineTo(g.W, y); c.stroke();
-  c.font = '600 ' + Math.round(h * 0.5) + 'px system-ui, sans-serif';
-  c.fillStyle = 'rgba(160,210,255,.35)';
-  c.textAlign = 'center'; c.textBaseline = 'middle';
-  var msg = 'AI AGENT · SOLVE PROBLEMS · PENALTY SHOOTOUT · ';
-  c.fillText(msg + msg, g.W / 2, y + h * 0.55);
-  c.textAlign = 'start'; c.textBaseline = 'alphabetic';
-}
-
-function drawPitch(g){
-  var c = D.ctx, top = g.H * 0.287;
-  var grd = c.createLinearGradient(0, top, 0, g.H);
-  grd.addColorStop(0, '#0f3d24'); grd.addColorStop(1, '#1c7a45');
-  c.fillStyle = grd; c.fillRect(0, top, g.W, g.H - top);
-
-  /* perspective stripes */
-  var stripes = 9;
-  for (var i = 0; i < stripes; i++){
-    var t0 = i / stripes, t1 = (i + 0.5) / stripes;
-    c.fillStyle = 'rgba(255,255,255,.045)';
-    quad(c, top, g.spotY, t0, t1);
-  }
-
-  /* goal area + 6 yard box + penalty box (projected) */
-  c.strokeStyle = 'rgba(255,255,255,.42)'; c.lineWidth = Math.max(1.5, g.W * 0.0022);
-  boxProjected(c, g, g.goalHalf * 1.30, 0.30);
-  boxProjected(c, g, g.goalHalf * 2.35, 0.74);
-
-  /* penalty arc */
-  c.beginPath();
-  c.ellipse(g.cx, g.spotY - g.H * 0.10, g.goalHalf * 1.7, g.H * 0.055, 0, Math.PI, 2 * Math.PI);
-  c.stroke();
-
-  /* penalty spot */
-  c.fillStyle = 'rgba(255,255,255,.80)';
-  c.beginPath(); c.ellipse(g.cx, g.spotY - g.H * 0.012, g.W * 0.012, g.W * 0.005, 0, 0, 6.29);
-  c.fill();
-}
-
-function quad(c, top, bottom, t0, t1){
-  var w = function(t){ return lerp(1.55, 0.34, t) * window.innerWidth; };
-  var y0 = lerp(bottom, top, t0), y1 = lerp(bottom, top, t1);
-  var x0 = (c.canvas.clientWidth - w(t0)) / 2, x1 = (c.canvas.clientWidth - w(t1)) / 2;
-  c.beginPath();
-  c.moveTo(x0, y0); c.lineTo(x0 + w(t0), y0);
-  c.lineTo(x1 + w(t1), y1); c.lineTo(x1, y1);
-  c.closePath(); c.fill();
-}
-
-function boxProjected(c, g, halfW, tBack){
-  var y = lerp(g.spotY, g.goalBottomY, 1 - tBack * 0.5);
-  var w = halfW * lerp(1.0, 0.72, tBack);
-  c.beginPath();
-  c.moveTo(g.cx - w, y); c.lineTo(g.cx + w, y);
-  c.stroke();
-  c.beginPath();
-  c.moveTo(g.cx - w, y); c.lineTo(g.cx - w * 0.92, g.goalBottomY);
-  c.moveTo(g.cx + w, y); c.lineTo(g.cx + w * 0.92, g.goalBottomY);
-  c.stroke();
-}
-
-function drawGoal(g, ripple){
-  var c = D.ctx;
-  var x0 = g.cx - g.goalHalf, x1 = g.cx + g.goalHalf;
-  var yTop = g.goalTopY, yBot = g.goalBottomY;
-
-  /* net */
-  c.save();
-  c.beginPath(); c.rect(x0, yTop, g.goalHalf * 2, g.goalH); c.clip();
-  c.fillStyle = 'rgba(8,16,26,.55)'; c.fillRect(x0, yTop, g.goalHalf * 2, g.goalH);
-  c.strokeStyle = 'rgba(220,235,255,.20)'; c.lineWidth = 1;
-  var stepX = g.goalHalf / 9, stepY = g.goalH / 6;
-  for (var i = 1; i < 9; i++){
-    c.beginPath();
-    c.moveTo(x0 + i * stepX, yTop);
-    c.lineTo(lerp(x0 + i * stepX, g.cx, 0.14), yBot);
-    c.stroke();
-  }
-  for (var j = 1; j < 6; j++){
-    c.beginPath();
-    c.moveTo(x0, yTop + j * stepY); c.lineTo(x1, yTop + j * stepY);
-    c.stroke();
-  }
-  if (ripple){
-    var p = ripple.t / 0.6;
-    if (p < 1){
-      c.strokeStyle = 'rgba(255,255,255,' + (0.5 * (1 - p)).toFixed(2) + ')';
-      c.lineWidth = 2.4 * (1 - p);
-      c.beginPath();
-      c.ellipse(ripple.px, ripple.py, 10 + p * 54, 8 + p * 40, 0, 0, 6.29);
-      c.stroke();
-    }
-  }
-  c.restore();
-
-  /* frame */
-  c.strokeStyle = '#eef4ff'; c.lineCap = 'round';
-  c.lineWidth = Math.max(5, g.W * 0.0075);
-  c.beginPath();
-  c.moveTo(x0, yBot); c.lineTo(x0, yTop); c.lineTo(x1, yTop); c.lineTo(x1, yBot);
-  c.stroke();
-  c.lineCap = 'butt';
-}
-/* -------------------------- keeper / ball / fx -------------------------- */
-function drawKeeper(g){
-  var c = D.ctx;
-  var feetY = g.goalBottomY + 1;
-  var bodyH = g.goalH * 0.74;
-  var kx = g.cx + S.keeper.px;
-  var ky = feetY - S.keeper.py * g.goalH * 0.42;
-  var p = S.keeper.t;
-  var lean = (S.plan ? (S.plan.dir || 0) : 0) * p;
-
-  c.save();
-  c.translate(kx, ky);
-  c.rotate(lean * 0.85);
-  var s = bodyH / 100;
-
-  /* shadow */
-  c.fillStyle = 'rgba(0,0,0,.35)';
-  c.beginPath(); c.ellipse(0, 2, 26 * s, 7 * s, 0, 0, 6.29); c.fill();
-
-  /* legs */
-  c.fillStyle = '#1b2a4a';
-  c.fillRect(-13 * s, -42 * s, 10 * s, 42 * s);
-  c.fillRect(3 * s, -42 * s, 10 * s, 42 * s);
-  c.fillStyle = '#0d1626';
-  c.fillRect(-14 * s, -4 * s, 12 * s, 5 * s);
-  c.fillRect(2 * s, -4 * s, 12 * s, 5 * s);
-
-  /* body */
-  var jersey = c.createLinearGradient(0, -86 * s, 0, -38 * s);
-  jersey.addColorStop(0, '#ffd166'); jersey.addColorStop(1, '#ff9f1c');
-  c.fillStyle = jersey;
-  c.beginPath();
-  c.moveTo(-20 * s, -80 * s); c.lineTo(20 * s, -80 * s);
-  c.lineTo(16 * s, -36 * s); c.lineTo(-16 * s, -36 * s);
-  c.closePath(); c.fill();
-
-  /* arms */
-  c.strokeStyle = '#ffd166'; c.lineWidth = 9 * s; c.lineCap = 'round';
-  var spread = 18 + p * 34;
-  c.beginPath(); c.moveTo(-16 * s, -74 * s);
-  c.lineTo(-spread * s, (-74 + p * 26) * s); c.stroke();
-  c.beginPath(); c.moveTo(16 * s, -74 * s);
-  c.lineTo(spread * s, (-74 + p * 26) * s); c.stroke();
-  /* gloves */
-  c.fillStyle = '#2ec4b6';
-  c.beginPath(); c.arc(-spread * s, (-74 + p * 26) * s, 7.5 * s, 0, 6.29); c.fill();
-  c.beginPath(); c.arc(spread * s, (-74 + p * 26) * s, 7.5 * s, 0, 6.29); c.fill();
-
-  /* head */
-  c.fillStyle = '#f2c9a0';
-  c.beginPath(); c.arc(0, -92 * s, 12 * s, 0, 6.29); c.fill();
-  c.fillStyle = '#22304a';
-  c.beginPath(); c.arc(0, -96 * s, 12 * s, Math.PI, 2 * Math.PI); c.fill();
-
-  c.restore();
-}
-
-function drawBall(g){
-  var c = D.ctx;
-  var showBall = (S.phase !== 'aim' && S.phase !== 'charging') || true;
-  if (!showBall) return;
-
-  /* trail */
-  for (var i = 0; i < S.ball.trail.length; i++){
-    var t = S.ball.trail[i];
-    var a = (i + 1) / S.ball.trail.length;
-    c.fillStyle = 'rgba(255,255,255,' + (0.16 * a).toFixed(2) + ')';
-    c.beginPath(); c.arc(t.x, t.y, S.ball.r * 0.85 * a, 0, 6.29); c.fill();
-  }
-
-  var isFlight = S.phase === 'flying' || S.phase === 'result';
-  var groundY = isFlight
-    ? lerp(g.ballRestY, g.goalBottomY, easeInOut(S.flight.t))
-    : g.spotY;
-  var air = Math.max(0, groundY - S.ball.y);
-
-  /* shadow (shrinks as the ball rises) */
-  c.fillStyle = 'rgba(0,0,0,' + (0.38 - Math.min(0.28, air / 320)).toFixed(2) + ')';
-  c.beginPath();
-  c.ellipse(S.ball.x, groundY + 2, S.ball.r * (1.05 - Math.min(0.5, air / 420)),
-            S.ball.r * 0.36, 0, 0, 6.29);
-  c.fill();
-
-  /* ball */
-  var cx = S.ball.x, cy = S.ball.y, r = S.ball.r;
-  var grd = c.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.15, cx, cy, r);
-  grd.addColorStop(0, '#ffffff'); grd.addColorStop(0.75, '#e8eefb');
-  grd.addColorStop(1, '#b9c4dc');
-  c.fillStyle = grd;
-  c.beginPath(); c.arc(cx, cy, r, 0, 6.29); c.fill();
-
-  /* pentagon patches (spin) */
-  c.fillStyle = 'rgba(16,22,34,.92)';
-  c.save();
-  c.translate(cx, cy); c.rotate(S.ball.spin);
-  for (var k = 0; k < 5; k++){
-    var ang = k * (6.283 / 5);
-    var px = Math.cos(ang) * r * 0.52, py = Math.sin(ang) * r * 0.52;
-    c.beginPath();
-    c.moveTo(px, py - r * 0.17);
-    c.lineTo(px + r * 0.16, py - r * 0.04);
-    c.lineTo(px + r * 0.10, py + r * 0.16);
-    c.lineTo(px - r * 0.10, py + r * 0.16);
-    c.lineTo(px - r * 0.16, py - r * 0.04);
-    c.closePath(); c.fill();
-  }
-  c.restore();
-}
-
-function drawFx(g){
-  var c = D.ctx;
-  for (var i = 0; i < S.fx.length; i++){
-    var f = S.fx[i];
-    if (f.kind === 'spark'){
-      var a = clamp(1 - f.t / (f.life || 0.9), 0, 1);
-      c.globalAlpha = a;
-      c.fillStyle = f.col;
-      c.fillRect(f.x, f.y, f.s, f.s * 1.6);
-      c.globalAlpha = 1;
-    }
-  }
-}
-
-function drawReticle(g){
-  if (S.busy || S.phase === 'over') return;
-  var c = D.ctx;
-  var x = g.cx + S.aim.x * g.goalHalf;
-  var y = g.goalBottomY - S.aim.y * g.goalH;
-  var r = Math.max(9, g.W * 0.010);
-
-  c.strokeStyle = 'rgba(255,255,255,.85)'; c.lineWidth = 2;
-  c.beginPath(); c.arc(x, y, r, 0, 6.29); c.stroke();
-  c.beginPath();
-  c.moveTo(x - r * 1.9, y); c.lineTo(x - r * 0.6, y);
-  c.moveTo(x + r * 0.6, y); c.lineTo(x + r * 1.9, y);
-  c.moveTo(x, y - r * 1.9); c.lineTo(x, y - r * 0.6);
-  c.moveTo(x, y + r * 0.6); c.lineTo(x, y + r * 1.9);
-  c.stroke();
-
-  if (S.charging){
-    c.strokeStyle = 'rgba(56,239,125,.95)'; c.lineWidth = 3.4;
-    c.beginPath();
-    c.arc(x, y, r * 2.6, -Math.PI / 2, -Math.PI / 2 + 6.283 * S.power);
-    c.stroke();
-  }
+  if (Renderer2D) Renderer2D.resize();
+  if (Renderer3D) Renderer3D.resize();
 }
 
 /* --------------------------------- loop --------------------------------- */
 var last = 0;
+/* captures and tests hold the frame exactly where they left it */
+var frozen = false;
+
 function frame(ts){
-  var dt = Math.min(0.033, (ts - last) / 1000 || 0.016);
+  var raw = Math.min(0.033, (ts - last) / 1000 || 0.016);
   last = ts;
-  S.time += dt;
+  /* S.timeScale is the slow-motion lever: 1 normally, lower for the aftermath */
+  var dt = raw * (S.timeScale || 1);
 
-  updatePower(dt);
-  if (S.phase === 'flying'){ updateFlight(dt); updateKeeper(dt); }
-  updateFx(dt);
+  if (!frozen){
+    S.time += dt;
 
-  var c = D.ctx, g = geometry();
-  c.setTransform(Math.min(window.devicePixelRatio || 1, 2), 0, 0,
-                 Math.min(window.devicePixelRatio || 1, 2), 0, 0);
-  var sx = 0, sy = 0;
-  if (S.shake > 0 && !S.reduce){ sx = rand(-S.shake, S.shake); sy = rand(-S.shake, S.shake); }
-  c.save(); c.translate(sx, sy);
+    updatePower(dt);
+    if (S.phase === 'flying'){ updateFlight(dt); updateKeeper(dt); }
+    updateFx(dt);
+    updateAiHud();
 
-  drawSky(g);
-  drawCrowd(g, S.time);
-  drawBoards(g);
-  drawPitch(g);
-  drawGoal(g, S.fx.filter(function(f){ return f.kind === 'netRipple'; })[0]);
-  drawKeeper(g);
-  drawBall(g);
-  drawFx(g);
-  drawReticle(g);
+    /* the round advances on the simulation clock, not a wall clock */
+    if (S.wait > 0){
+      S.wait -= dt;
+      if (S.wait <= 0){ S.wait = 0; nextRound(); }
+    }
+  }
 
-  c.restore();
-
-  /* vignette */
-  var vg = c.createRadialGradient(g.W / 2, g.H / 2, Math.min(g.W, g.H) * 0.35,
-                                  g.W / 2, g.H / 2, Math.max(g.W, g.H) * 0.78);
-  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.55)');
-  c.fillStyle = vg; c.fillRect(0, 0, g.W, g.H);
+  if (Renderer3D && Renderer3D.active()) Renderer3D.render(frozen ? 0 : dt);
+  else Renderer2D.render(geometry());
 
   requestAnimationFrame(frame);
+}
+/* ------------------------- test / capture hooks --------------------------
+   A tiny driver so the shipped page can be exercised headlessly: it is how the
+   screenshots and the end-to-end run in the README are produced. Modes:
+     #cap=rest          stand still on the spot
+     #cap=flight,N      take a penalty and fast-forward N simulation ticks
+     #cap=outcome       take a penalty and stop just after the verdict
+     #cap=e2e           play a whole shootout and report the result
+   ------------------------------------------------------------------------ */
+function stepSim(n, dt){
+  dt = dt || 1 / 60;
+  for (var i = 0; i < n; i++){
+    updatePower(dt);
+    if (S.phase === 'flying'){ updateFlight(dt); updateKeeper(dt); }
+    updateFx(dt);
+    if (S.wait > 0){
+      S.wait -= dt;
+      if (S.wait <= 0){ S.wait = 0; nextRound(); }
+    }
+  }
+}
+
+/* a scripted shot for captures: keep trying until the verdict is the one the
+   shot is meant to show, so a "goal" screenshot is always a goal */
+function scriptedShot(want){
+  for (var i = 0; i < 14; i++){
+    S.aim = { x: (i % 2 ? -1 : 1) * (i < 4 ? 0.86 : 0.62),
+              y: 0.28 + (i % 3) * 0.06 };
+    S.power = CFG.SWEET;
+    shootPenalty();
+    if (!want || S.shot.verdict === want) return S.shot;
+    S.busy = false; S.phase = 'aim'; S.wait = 0;
+    S.shot = null; S.plan = null;
+    S.history.pop();
+  }
+  return S.shot;
+}
+
+function probe(){
+  return {
+    ready3d: !!(Renderer3D && Renderer3D.active()),
+    dead3d: !!(Renderer3D && Renderer3D.dead()),
+    phase: S.phase, round: S.shotIndex + 1, goals: S.goals,
+    streak: S.streak, busy: S.busy, wait: +S.wait.toFixed(2),
+    scale: S.timeScale, power: +S.power.toFixed(3),
+    aim: { x: +S.aim.x.toFixed(2), y: +S.aim.y.toFixed(2) },
+    verdict: S.shot ? S.shot.verdict : null,
+    results: S.results.slice(),
+    overlay: D.overlay.classList.contains('show'),
+    title: D.ovTitle.textContent,
+    three: typeof window.THREE !== 'undefined',
+    err3d: window.__err3d || null,
+    r3: (Renderer3D && Renderer3D.active()) ? Renderer3D.state() : null
+  };
+}
+
+function report(tag){
+  var txt = tag + ' ' + JSON.stringify(probe());
+  document.title = txt;
+  var d = document.getElementById('probe');
+  if (!d){
+    d = document.createElement('div');
+    d.id = 'probe';
+    d.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:99;' +
+      'background:#fff;color:#000;font:11px monospace;padding:4px;max-width:96vw';
+    document.body.appendChild(d);
+  }
+  d.textContent = txt;
+}
+
+/* wait for the stadium to be up (or for it to give up) before driving */
+function whenStadium(cb, capMs){
+  var started = Date.now();
+  capMs = capMs || 12000;
+  (function poll(){
+    var state = !Renderer3D ? 'dead'
+              : Renderer3D.active() ? 'ready'
+              : Renderer3D.dead() ? 'dead' : 'loading';
+    if (state !== 'loading' || Date.now() - started > capMs) cb(state);
+    else setTimeout(poll, 50);
+  })();
+}
+
+function capture(){
+  var m = /^cap(?:=([a-z0-9]+)(?:,(-?\d+))?)?$/.exec((location.hash || '').replace(/^#/, ''));
+  if (!m) return;
+  var mode = m[1] || 'rest';
+  var arg = parseInt(m[2] || '12', 10);
+
+  whenStadium(function(state){
+    report('CAP ' + mode + ' [' + state + ']');
+    if (mode === 'rest'){ setTimeout(function(){ report('CAP rest [' + state + ']'); }, 400); }
+  });
+
+  if (mode === 'e2e'){
+    whenStadium(function(){
+      var fired = 0;
+      /* aim somewhere different every time, like a real shootout */
+      var spots = [{ x: 0.86, y: 0.30 }, { x: -0.82, y: 0.55 },
+                   { x: 0.55, y: 0.92 }, { x: -0.60, y: 0.22 },
+                   { x: 0.10, y: 0.45 }];
+      var iv = setInterval(function(){
+        if (fired >= CFG.ROUNDS){
+          if (S.phase === 'over'){
+            clearInterval(iv);
+            report('CAP e2e done');
+            frozen = true;
+            return;
+          }
+          stepSim(30);
+          return;
+        }
+        if (!S.busy){
+          S.aim = spots[fired % spots.length];
+          S.power = CFG.SWEET;
+          shootPenalty();
+          fired++;
+        }
+        stepSim(40);
+      }, 25);
+    });
+    return;
+  }
+  if (mode === 'rest') return;
+
+  whenStadium(function(){
+    if (mode === 'goal' || mode === 'save'){
+      scriptedShot(mode === 'goal' ? 'goal' : 'saved');
+      var guard = 0;
+      while (S.phase !== 'result' && guard++ < 400) stepSim(1);
+      stepSim(14);
+    } else if (mode === 'flight' || mode === 'outcome'){
+      scriptedShot('goal');
+      if (mode === 'outcome'){
+        var g2 = 0;
+        while (S.phase !== 'result' && g2++ < 400) stepSim(1);
+        stepSim(14);
+      } else {
+        stepSim(Math.abs(arg));
+      }
+    }
+    report('CAP ' + mode);
+    /* pin this exact frame: the screenshot is taken long after this runs, so
+       let the renderer catch its animations up first, then hold everything */
+    if (Renderer3D && Renderer3D.active()){
+      var spins = (mode === 'flight') ? Math.abs(arg)
+                : (mode === 'goal' || mode === 'save' || mode === 'outcome') ? 45
+                : 28;
+      for (var t = 0; t < spins; t++) Renderer3D.tick(1 / 60);
+    }
+    frozen = true;
+    report('CAP ' + mode);
+  });
 }
 
 /* --------------------------------- init --------------------------------- */
@@ -929,6 +939,16 @@ function init(){
   loadBest();
   newGame();
   bindInput();
+
+  /* any failure anywhere lands in the probe, which is what the headless
+     captures read — a silent black screen is the one outcome we never want */
+  window.addEventListener('error', function(e){
+    if (!window.__err3d){
+      window.__err3d = String(e.message) + ' @' +
+        String(e.filename || '').split('/').pop() + ':' + e.lineno;
+    }
+  });
+  bootStadium();
 
   window.addEventListener('resize', resize);
   document.addEventListener('visibilitychange', function(){ last = 0; });
@@ -947,6 +967,43 @@ function init(){
   D.again.addEventListener('click', function(){ Sound.wake(); newGame(); });
 
   requestAnimationFrame(frame);
+
+  /* dev/CI driver, documented in the README */
+  try {
+    window.PENALTY = { S: S, LOGIC: LOGIC, CFG: CFG, DIFF: DIFF,
+                       probe: probe, stepSim: stepSim, scriptedShot: scriptedShot,
+                       freeze: function(on){ frozen = !!on; },
+                       renderer2d: Renderer2D, renderer3d: Renderer3D };
+  } catch (e){}
+  capture();
+}
+
+/* Bring the stadium in when it is ready. The flat renderer covers the load, and
+   if anything at all goes wrong the game simply stays 2D. */
+function bootStadium(){
+  if (!Renderer3D || Renderer3D.dead()) return;
+  if (/\bq=2d\b/.test((location.search || '') + (location.hash || ''))) return;
+  var splash = document.getElementById('splash');
+  if (splash) splash.classList.add('on');
+  Renderer3D.loadThree(function(ok){
+    var built = false;
+    if (ok){
+      try { built = Renderer3D.init(); }
+      catch (err){
+        built = false;
+        window.__err3d = String((err && err.stack) || err);
+      }
+    } else {
+      window.__err3d = 'three.js failed to load';
+    }
+    if (built){
+      D.canvas.style.display = 'none';
+      var stage = document.getElementById('stage');
+      if (stage) stage.classList.add('is3d');
+      resize();
+    }
+    if (splash) splash.classList.remove('on');
+  });
 }
 
 if (typeof document !== 'undefined' && document.getElementById){

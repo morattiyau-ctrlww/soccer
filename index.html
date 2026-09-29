@@ -39,6 +39,11 @@
     </div>
   </header>
 
+  <div class="ai" id="ai">
+    <b><i class="dot"></i>AI READ</b>
+    <span id="ai-text">scanning the taker…</span>
+  </div>
+
   <footer class="hud hud-bottom">
     <div class="hint" id="hint">
       Move to aim · <b>Hold</b> to power up · <b>Release</b> to shoot
@@ -62,7 +67,16 @@
       <button class="primary" id="again">Play again 再玩一次</button>
     </div>
   </div>
+
+  <div class="splash" id="splash"><i></i>Building the stadium 建立球場中…</div>
 </div>
+
+<!-- world model and renderers load first: the game asks them where the goal is
+     on screen, and the flat renderer covers the load while the 3D stadium
+     (three.js, vendored) is fetched. If anything fails, the game stays flat. -->
+<script src="world.js"></script>
+<script src="renderer2d.js"></script>
+<script src="renderer3d.js"></script>
 <script src="script.js"></script>
 </body>
 </html>
