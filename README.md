@@ -44,9 +44,10 @@ reaction 0.34s → 0.11s, anticipation 15% → 58%.
 ## Files
 
 ```
-index.html   HUD / markup
-style.css    HUD, overlays, responsive layout
-script.js    LOGIC (pure) + audio + renderer + game loop
+index.html              HUD / markup
+style.css               HUD, overlays, responsive layout
+script.js               LOGIC (pure) + audio + renderer + game loop
+tests/logic.test.js     headless tests for the pure logic
 ```
 
 `script.js` keeps every rule of the game inside the pure `LOGIC` block
@@ -57,6 +58,15 @@ unit-tested headlessly — it exports itself when loaded under CommonJS:
 const { LOGIC, DIFF, CFG } = require('./script.js');
 LOGIC.resolveShot({ x: 0.8, y: 0.3 }, 0.68, keeper, 'normal');
 ```
+
+## Tests
+
+```bash
+node tests/logic.test.js
+```
+
+15 assertions covering placement, woodwork, the power/accuracy curve, keeper
+reach and anticipation scaling, and the end-of-game rating — no browser needed.
 
 ## Deploy
 
