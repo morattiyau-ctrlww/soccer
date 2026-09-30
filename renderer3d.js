@@ -236,8 +236,8 @@ var Renderer3D = (function(){
   }
 
   function buildLights(){
-    scene.add(new T.HemisphereLight(0x9fc4ff, 0x0b2016, 0.20));
-    scene.add(new T.AmbientLight(0x8ea9d6, 0.08));
+    scene.add(new T.HemisphereLight(0x9fc4ff, 0x0b2016, 0.28));
+    scene.add(new T.AmbientLight(0x8ea9d6, 0.11));
 
     function flood(x, z, shadows, intensity, angle){
       /* decay 0: a floodlight 26 m up should not fall off like a light bulb */
@@ -257,9 +257,9 @@ var Renderer3D = (function(){
       lights.push(s);
       return s;
     }
-    flood(-22, 18, true, 2.7, 0.72);             /* the key: casts the shadows */
-    flood(22, 18, false, 1.5, 0.72);             /* fill, so nothing goes black */
-    flood(0, -20, false, 0.85, 0.85);            /* rim light from behind the goal */
+    flood(-22, 18, true, 3.1, 0.72);             /* the key: casts the shadows */
+    flood(22, 18, false, 1.8, 0.72);             /* fill, so nothing goes black */
+    flood(0, -20, false, 1.0, 0.85);             /* rim light from behind the goal */
 
     /* the towers themselves, up behind the goal where you can see them */
     var panelMat = new T.MeshBasicMaterial({ color: 0xfff4d2 });
