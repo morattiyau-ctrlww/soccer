@@ -508,167 +508,428 @@ var Renderer3D = (function(){
   }
 
   /* ------------------------------ the keeper -------------------------------
-     A joint hierarchy of primitives. Keeping it in real proportions and
-     leaning him with the dive is what makes the save read as a save.        */
-  var KIT = { shirt: 0xffc93c, shirt2: 0xe07b1c, glove: 0x2ec4b6,
-              shorts: 0x1b2a4a, skin: 0xf0c49c, hair: 0x1d2433, boot: 0x0d1626,
-              sock: 0x22304d };
+     A joint hierarchy in real anthropometry for a 1.90 m athlete: tapered
+     limbs rather than boxes, deltoids, a number on his back, knee pads, socks
+     with a cuff, cleats with a sole and studs, and gloves with fingers that
+     can actually close. The fingers exist because the `catch` state has to be
+     able to hold the ball, not just be near it.                            */
+  var KIT = { shirt: 0xffc93c, shirt2: 0xe07b1c, trim: 0x141b2b,
+              glove: 0x2ec4b6, gloveDark: 0x17897f,
+              shorts: 0x1b2a4a, skin: 0xf0c49c, skinDark: 0xd8a374,
+              hair: 0x1d2433, boot: 0x0d1626, sole: 0xf2f5fa, sock: 0x22304d,
+              pad: 0x2b3a55 };
+
+  /* the number on his back, painted rather than modelled */
+  function numberTexture(n){
+    var s = 128, cv = document.createElement('canvas');
+    cv.width = cv.height = s;
+    var c = cv.getContext('2d');
+    c.clearRect(0, 0, s, s);
+    c.fillStyle = 'rgba(20,27,43,.92)';
+    c.font = '900 92px "Helvetica Neue", system-ui, sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(String(n), s / 2, s / 2 + 4);
+    var t = new T.CanvasTexture(cv);
+    t.colorSpace = T.SRGBColorSpace;
+    return t;
+  }
 
   function buildKeeper(){
     var root = new T.Group();
     root.position.set(0, 0, 0.35);
-    var g = {};
+    var g = { arm: {}, leg: {}, hand: {} };
 
     function mat(col, rough, metal){
-      return new T.MeshStandardMaterial({ color: col, roughness: rough === undefined ? 0.7 : rough,
-                                          metalness: metal || 0 });
+      return new T.MeshStandardMaterial({ color: col,
+        roughness: rough === undefined ? 0.7 : rough, metalness: metal || 0 });
     }
     function box(w, h, d, m, x, y, z, parent){
       var mesh = new T.Mesh(new T.BoxGeometry(w, h, d), m);
       mesh.position.set(x, y, z);
-      mesh.castShadow = true;
+      (parent || root).add(mesh);
+      return mesh;
+    }
+    /* a tapered limb: capsule-ish limbs read as muscle, boxes read as Lego */
+    function limb(rTop, rBot, len, m, parent, flatZ){
+      var mesh = new T.Mesh(new T.CylinderGeometry(rTop, rBot, len, 12, 1), m);
+      if (flatZ) mesh.scale.z = flatZ;
+      mesh.position.y = -len / 2;                 /* hangs from its joint */
+      (parent || root).add(mesh);
+      return mesh;
+    }
+    function ball3(r, m, x, y, z, parent, seg){
+      var mesh = new T.Mesh(new T.SphereGeometry(r, seg || 14, (seg || 14) - 2), m);
+      mesh.position.set(x, y, z);
       (parent || root).add(mesh);
       return mesh;
     }
 
-    /* torso pivots at the pelvis so a dive can rotate hips + chest together */
-    var hips = new T.Group(); hips.position.y = 0.92; root.add(hips);
+    /* ---- pelvis + torso: pivots at the pelvis so a dive rotates the lot --- */
+    var hips = new T.Group(); hips.position.y = 0.94; root.add(hips);
     g.hips = hips;
-    box(0.34, 0.24, 0.22, mat(KIT.shorts), 0, -0.05, 0, hips);
+    box(0.33, 0.23, 0.21, mat(KIT.shorts), 0, -0.055, 0, hips);
+    box(0.335, 0.05, 0.215, mat(KIT.trim, 0.8), 0, 0.06, 0, hips);   /* waistband */
 
-    var chest = new T.Group(); chest.position.y = 0.10; hips.add(chest);
+    var chest = new T.Group(); chest.position.y = 0.075; hips.add(chest);
     g.chest = chest;
-    var torso = box(0.46, 0.60, 0.26, mat(KIT.shirt), 0, 0.30, 0, chest);
-    torso.castShadow = true;
-    box(0.48, 0.16, 0.27, mat(KIT.shirt2), 0, 0.60, 0, chest);
-    box(0.30, 0.30, 0.28, mat(KIT.shirt2), 0, 0.30, 0.005, chest);   /* number patch */
+    /* the torso tapers: broad across the chest, narrow at the waist */
+    var torso = new T.Mesh(new T.CylinderGeometry(0.215, 0.155, 0.58, 14, 1),
+                           mat(KIT.shirt, 0.72));
+    torso.scale.z = 0.60;
+    torso.position.y = 0.30;
+    chest.add(torso);
+    /* the flare of the shirt over the hips, so the kit is not skin-tight */
+    var hem = new T.Mesh(new T.CylinderGeometry(0.168, 0.185, 0.10, 14, 1),
+                         mat(KIT.shirt, 0.8));
+    hem.scale.z = 0.62; hem.position.y = 0.015; chest.add(hem);
+    /* collar, and the number patch on his back */
+    var collar = new T.Mesh(new T.CylinderGeometry(0.075, 0.085, 0.045, 12, 1),
+                            mat(KIT.trim, 0.8));
+    collar.scale.z = 0.7; collar.position.y = 0.605; chest.add(collar);
+    var num = new T.Mesh(new T.PlaneGeometry(0.20, 0.20),
+      new T.MeshStandardMaterial({ map: numberTexture(1), transparent: true,
+                                   roughness: 0.85 }));
+    num.position.set(0, 0.34, -0.134);
+    num.rotation.y = Math.PI;
+    chest.add(num);
 
-    var neck = new T.Group(); neck.position.y = 0.70; chest.add(neck);
+    /* ---- head: enough of a face to carry the disappointment -------------- */
+    var neck = new T.Group(); neck.position.y = 0.63; chest.add(neck);
     g.neck = neck;
-    var head = new T.Mesh(new T.SphereGeometry(0.132, 16, 14), mat(KIT.skin, 0.85));
-    head.position.y = 0.14; head.castShadow = true;
-    neck.add(head);
-    var hair = new T.Mesh(new T.SphereGeometry(0.138, 16, 12, 0, 6.29, 0, 1.5),
+    var neckMesh = new T.Mesh(new T.CylinderGeometry(0.055, 0.062, 0.10, 10),
+                              mat(KIT.skin, 0.85));
+    neckMesh.position.y = 0.05; neck.add(neckMesh);
+    var head = ball3(0.115, mat(KIT.skin, 0.82), 0, 0.175, 0, neck, 18);
+    head.scale.set(0.95, 1.1, 1.0);
+    var hair = new T.Mesh(new T.SphereGeometry(0.118, 18, 12, 0, 6.29, 0, 1.6),
                           mat(KIT.hair, 0.95));
-    hair.position.y = 0.15; neck.add(hair);
-
-    /* arms: shoulder -> elbow -> glove */
-    g.arm = {};
+    hair.position.y = 0.185; hair.scale.set(0.98, 1.05, 1.02); neck.add(hair);
+    /* eyes and a brow: at this scale that is all it takes for a head tilt to
+       read as a mood */
     [-1, 1].forEach(function(s){
+      ball3(0.017, mat(0x101826, 0.5), s * 0.042, 0.185, 0.105, neck, 8);
+    });
+    g.brow = box(0.115, 0.014, 0.02, mat(0x161d2b, 0.9), 0, 0.212, 0.104, neck);
+
+    /* ---- arms: shoulder -> elbow -> glove (with fingers) ----------------- */
+    [-1, 1].forEach(function(s){
+      var side = s < 0 ? 'l' : 'r';
       var sh = new T.Group();
-      sh.position.set(s * 0.29, 0.56, 0);
+      sh.position.set(s * 0.205, 0.545, 0);
       chest.add(sh);
-      box(0.12, 0.34, 0.12, mat(KIT.shirt), 0, -0.17, 0, sh);
-      var el = new T.Group(); el.position.y = -0.34; sh.add(el);
-      box(0.11, 0.32, 0.11, mat(KIT.skin, 0.85), 0, -0.16, 0, el);
-      var glove = new T.Mesh(new T.SphereGeometry(0.11, 12, 10), mat(KIT.glove, 0.65));
-      glove.position.y = -0.36;
-      glove.scale.set(1, 1.15, 0.7);
-      glove.castShadow = true;
-      el.add(glove);
-      g.arm[s < 0 ? 'l' : 'r'] = { sh: sh, el: el, glove: glove };
+      /* deltoid, then a tapered upper arm */
+      ball3(0.082, mat(KIT.shirt, 0.75), 0, -0.02, 0, sh);
+      limb(0.072, 0.056, 0.30, mat(KIT.shirt, 0.75), sh);
+      box(0.145, 0.05, 0.155, mat(KIT.shirt2, 0.8), 0, -0.275, 0, sh);  /* sleeve hem */
+
+      var el = new T.Group(); el.position.y = -0.30; sh.add(el);
+      limb(0.055, 0.046, 0.26, mat(KIT.skin, 0.85), el);   /* bare forearm */
+
+      /* the hand: a palm and five digits that can close on a ball */
+      var hand = new T.Group();
+      hand.position.y = -0.28;
+      el.add(hand);
+      var palm = box(0.105, 0.105, 0.055, mat(KIT.glove, 0.62), 0, 0, 0, hand);
+      var fingers = [];
+      for (var f = 0; f < 4; f++){
+        var knuckle = new T.Group();
+        knuckle.position.set(-0.038 + f * 0.025, -0.052, 0.004);
+        hand.add(knuckle);
+        var seg = new T.Mesh(new T.BoxGeometry(0.022, 0.062, 0.045),
+                             mat(KIT.glove, 0.62));
+        seg.position.y = -0.031;
+        knuckle.add(seg);
+        fingers.push(knuckle);
+      }
+      var thumb = new T.Group();
+      thumb.position.set(s * 0.048, -0.012, 0.012);
+      thumb.rotation.z = -s * 0.7;
+      hand.add(thumb);
+      var thumbSeg = new T.Mesh(new T.BoxGeometry(0.026, 0.058, 0.042),
+                                mat(KIT.gloveDark, 0.6));
+      thumbSeg.position.y = -0.028;
+      thumb.add(thumbSeg);
+
+      g.arm[side] = { sh: sh, el: el, glove: palm, hand: hand };
+      g.hand[side] = { palm: palm, fingers: fingers, thumb: thumb };
+
+      /* the fingers rest half-open until a catch closes them */
+      fingers.forEach(function(k){ k.rotation.x = -0.45; });
     });
 
-    /* legs: hip -> knee -> boot */
-    g.leg = {};
+    /* ---- legs: hip -> knee -> boot, with a pad, a sock and cleats -------- */
     [-1, 1].forEach(function(s){
+      var side = s < 0 ? 'l' : 'r';
       var hip = new T.Group();
-      hip.position.set(s * 0.13, 0, 0);
+      hip.position.set(s * 0.115, 0, 0);
       hips.add(hip);
-      box(0.17, 0.46, 0.18, mat(KIT.shorts), 0, -0.23, 0, hip);
-      var knee = new T.Group(); knee.position.y = -0.46; hip.add(knee);
-      /* the lower leg is a long sock, not bare skin: it reads far better */
-      box(0.145, 0.44, 0.155, mat(KIT.sock, 0.9), 0, -0.22, 0, knee);
-      var boot = new T.Mesh(new T.BoxGeometry(0.16, 0.09, 0.30), mat(KIT.boot, 0.5));
-      boot.position.set(0, -0.47, 0.06);
-      boot.castShadow = true;
-      knee.add(boot);
-      g.leg[s < 0 ? 'l' : 'r'] = { hip: hip, knee: knee, boot: boot };
+      box(0.17, 0.42, 0.175, mat(KIT.shorts), 0, -0.21, 0, hip);
+      limb(0.096, 0.072, 0.40, mat(KIT.skin, 0.85), hip);   /* thigh, in shorts */
+
+      var knee = new T.Group(); knee.position.y = -0.44; hip.add(knee);
+      ball3(0.075, mat(KIT.pad, 0.8), 0, 0.005, 0.012, knee);   /* knee pad */
+      limb(0.068, 0.052, 0.40, mat(KIT.sock, 0.9), knee);       /* long sock */
+      box(0.125, 0.035, 0.135, mat(KIT.trim, 0.85), 0, -0.03, 0, knee);  /* cuff */
+
+      var foot = new T.Group(); foot.position.set(0, -0.44, 0.005); knee.add(foot);
+      /* the boot: upper, sole and studs — this is what a keeper is judged on */
+      var boot = new T.Mesh(new T.BoxGeometry(0.10, 0.075, 0.26),
+                            mat(KIT.boot, 0.45));
+      boot.position.set(0, -0.045, 0.055);
+      foot.add(boot);
+      var toe = new T.Mesh(new T.BoxGeometry(0.095, 0.055, 0.06),
+                           mat(KIT.boot, 0.4));
+      toe.position.set(0, -0.05, 0.175);
+      foot.add(toe);
+      var sole = new T.Mesh(new T.BoxGeometry(0.104, 0.018, 0.29),
+                            mat(KIT.sole, 0.35));
+      sole.position.set(0, -0.088, 0.062);
+      foot.add(sole);
+      for (var st = 0; st < 6; st++){
+        var stud = new T.Mesh(new T.CylinderGeometry(0.008, 0.008, 0.016, 6),
+                              mat(KIT.sole, 0.3));
+        stud.position.set((st % 2 ? 0.03 : -0.03), -0.10, -0.05 + st * 0.045);
+        foot.add(stud);
+      }
+      g.leg[side] = { hip: hip, knee: knee, boot: boot, foot: foot };
     });
 
-    root.traverse(function(o){ if (o.isMesh) o.castShadow = true; });
+    root.traverse(function(o){
+      if (o.isMesh){ o.castShadow = true; o.receiveShadow = true; }
+    });
     scene.add(root);
     keeper = { root: root, g: g };
   }
 
   /* --------------------------- keeper animation -----------------------------
-     Every value is smoothed towards a target, so nothing ever snaps: the dive
-     is a real rotation of the whole body plus the arms reaching for the ball. */
-  var A = { lean: 0, lift: 0, crouch: 0, arm: 0, elbow: 0, split: 0, knee: 0,
-            twist: 0, x: 0, z: 0.35, feint: 0 };
+     A named state machine driving keyframed poses (see WORLD.keeperState for
+     the state decision, so the flat renderer and this one cannot disagree):
+
+       idle      alive on his line: weight shifts, gloves up, a weight bounce
+       scan      leaning with your aim, crouching into your power
+       dive_*    three keys — wind-up, extension, land — per height and side
+       catch     the fingers close and the ball is held in the glove
+       deflect   a straight arm punching the ball away
+       conceded  beaten: he slumps, or turns and watches it go past him
+
+     Every channel is smoothed on its way to the target, so states cross-fade
+     instead of snapping.                                                    */
+  var A = { lean: 0, lift: 0, crouch: 0.12, arm: 0.50, elbow: 0.34, split: 0.12,
+            knee: 0.08, twist: 0, x: 0, y: 0, z: 0.35, grip: 0.05, head: 0,
+            watch: 0 };
 
   function approach(v, target, rate, dt){
     return v + (target - v) * (1 - Math.exp(-rate * dt));
   }
 
-  function keeperPose(dt){
-    var ph = S.phase, t = S.time;
-    var plan = S.plan;
-    var diving = (ph === 'flying' || ph === 'result') && plan;
-    var p = 0;
-    if (diving) p = WORLD.diveProgress(S.flight.t, plan, S.flight.dur);
+  /* ---- keyframes: a pose is a flat bag of channels, a state is a list of
+     keys in time, and each segment can carry its own easing ---------------- */
+  var CHANNELS = ['lean', 'lift', 'crouch', 'arm', 'elbow', 'split',
+                  'knee', 'twist', 'x', 'y', 'z', 'grip', 'head', 'watch'];
 
-    /* ---- targets ---- */
-    var tgt = { lean: 0, lift: 0, crouch: 0.10, arm: 0.42, elbow: 0.30,
-                split: 0.10, knee: 0.05, twist: 0, x: 0, z: 0.35, feint: 0 };
-    var sign = 0;
-
-    if (diving){
-      sign = Math.abs(plan.x) < 0.14 ? 0 : (plan.x > 0 ? 1 : -1);
-      var low = plan.y < 0.45;
-      var mid = plan.y >= 0.45 && plan.y < 0.85;
-      /* a big dive: body goes over, legs follow, arms stretch to the corner */
-      tgt.lean   = -sign * (low ? 1.02 : (mid ? 0.86 : 0.66));
-      tgt.lift   = low ? 0.10 : (mid ? 0.30 : 0.52);
-      tgt.crouch = low ? -0.16 : -0.05;
-      tgt.arm    = 1.45;
-      tgt.elbow  = 0.08;
-      tgt.split  = 0.22;
-      tgt.knee   = low ? 0.55 : 0.30;
-      tgt.twist  = sign * 0.28;
-      /* he can only carry himself so far; the stretch covers the last half metre */
-      tgt.x = plan.x * (WORLD.GOAL.w / 2) - sign * 0.42;
-      /* the feint: he shows you one way before he goes the other */
-      if (plan.read && S.diff === 'legend') tgt.feint = (p < 0.42 ? -sign * 0.30 : 0);
-      tgt.x += tgt.feint;
-    } else if (ph === 'charging'){
-      tgt.crouch = 0.34; tgt.arm = 0.66; tgt.elbow = 0.55; tgt.split = 0.18;
-      tgt.knee = 0.16;
-      tgt.x = Math.sin(t * 2.1) * 0.10;
-    } else if (ph === 'aim'){
-      /* alive on his line: weight shifting, gloves up, barking at the taker */
-      tgt.crouch = 0.22 + Math.sin(t * 2.4) * 0.03;
-      tgt.arm = 0.52 + Math.sin(t * 2.4 + 1.1) * 0.06;
-      tgt.elbow = 0.42;
-      tgt.split = 0.16;
-      tgt.knee = 0.10;
-      tgt.x = Math.sin(t * 1.15) * 0.22;
-      tgt.twist = Math.sin(t * 1.15) * 0.08;
+  function blend(a, b, u){
+    var out = {};
+    for (var i = 0; i < CHANNELS.length; i++){
+      var k = CHANNELS[i];
+      out[k] = lerp(a[k], b[k], u);
     }
+    return out;
+  }
 
-    var rate = diving ? 11 : 4.2;
-    for (var k in tgt){
-      if (tgt.hasOwnProperty(k)) A[k] = approach(A[k], tgt[k], rate, dt);
+  /* evaluate a keyframed pose at normalized time k (0..1) */
+  function keyed(keys, k){
+    k = WORLD.clamp(k, 0, 1);
+    var a = keys[0], b = keys[keys.length - 1];
+    for (var i = 0; i < keys.length - 1; i++){
+      if (k >= keys[i].at && k <= keys[i + 1].at){ a = keys[i]; b = keys[i + 1]; break; }
     }
+    var span = Math.max(1e-4, b.at - a.at);
+    var u = (k - a.at) / span;
+    /* the extension is explosive and the landing settles: ease per segment */
+    if (a.ease === 'out') u = 1 - Math.pow(1 - u, 3);
+    else if (a.ease === 'in') u = u * u;
+    else u = u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+    return blend(a.pose, b.pose, u);
+  }
 
-    var g = keeper.g;
-    keeper.root.position.set(A.x, A.lift, A.z);
+  /* a complete pose, with anything unstated inherited from the last frame */
+  function full(p){
+    var out = {};
+    for (var i = 0; i < CHANNELS.length; i++) out[CHANNELS[i]] = A[CHANNELS[i]];
+    for (var k in p) if (p.hasOwnProperty(k)) out[k] = p[k];
+    return out;
+  }
+
+  var BAND = {
+    low:  { lean: 1.05, lift: 0.12, knee: 0.55, crouch: -0.16, z: 0.30 },
+    mid:  { lean: 0.88, lift: 0.34, knee: 0.30, crouch: -0.05, z: 0.38 },
+    high: { lean: 0.62, lift: 0.58, knee: 0.24, crouch:  0.02, z: 0.44 }
+  };
+
+  /* ---- idle: never still. He bounces, shifts weight and barks at you ---- */
+  function poseIdle(){
+    var t = S.time;
+    return full({
+      crouch: 0.30 + Math.sin(t * 2.3) * 0.045,
+      arm:    0.62 + Math.sin(t * 2.3 + 1.1) * 0.06,
+      elbow:  0.46,
+      split:  0.18,
+      knee:   0.24 + Math.sin(t * 2.3 + 0.6) * 0.05,
+      x: Math.sin(t * 1.15) * 0.20,
+      y: Math.abs(Math.sin(t * 2.3)) * 0.018,        /* the weight bounce */
+      lift: 0, z: 0.35,
+      twist: Math.sin(t * 1.15) * 0.10,
+      grip: 0.06 + Math.sin(t * 2.3) * 0.04,
+      head: -0.04, watch: Math.sin(t * 0.7) * 0.10
+    });
+  }
+
+  /* ---- scan: he reads the run-up. Lean follows your aim, crouch your power */
+  function poseScan(){
+    var t = S.time;
+    var side = Math.abs(S.aim.x) < 0.10 ? 0 : (S.aim.x > 0 ? 1 : -1);
+    var p = WORLD.clamp(S.power, 0, 1);
+    return full({
+      lean:  -side * (0.10 + p * 0.10),
+      crouch: 0.34 + p * 0.14 + Math.sin(t * 3.1) * 0.03,
+      arm:    0.68 + p * 0.14,
+      elbow:  0.50 - p * 0.10,
+      split:  0.20,
+      knee:   0.30 + p * 0.16,
+      x: Math.sin(t * 3.4) * 0.09 + side * 0.10,
+      y: Math.abs(Math.sin(t * 3.1)) * 0.022,
+      lift: 0, z: 0.35,
+      twist: side * 0.12,
+      grip:  0.10 + p * 0.15,
+      head:  -0.06, watch: side * 0.22
+    });
+  }
+
+  /* ---- the dive: wind-up, extension, land. Three keys, per band + side --- */
+  function poseDive(band, sign, planX, p){
+    var b = BAND[band] || BAND.mid;
+    var feint = (S.plan && S.plan.read && S.diff === 'legend') ? 1 : 0;
+    var keys = [
+      { at: 0.00, ease: 'out', pose: full({
+          lean: sign * 0.14, lift: 0, crouch: 0.50, arm: 0.34, elbow: 0.62,
+          split: 0.22, knee: 0.60, x: -sign * 0.10, twist: -sign * 0.10,
+          grip: 0.10, head: 0.02, y: 0, z: 0.35 }) },
+      { at: 0.26, ease: 'out', pose: full({
+          lean: -sign * b.lean * 0.58, lift: b.lift * 0.45, crouch: -0.02,
+          arm: 1.20, elbow: 0.16, split: 0.34, knee: b.knee * 0.80,
+          x: sign * 0.18, twist: sign * 0.20, z: b.z,
+          grip: 0.18, head: -0.06, y: 0, watch: sign * 0.20 }) },
+      { at: 0.72, ease: 'inout', pose: full({
+          lean: -sign * b.lean, lift: b.lift, crouch: b.crouch,
+          arm: 1.58, elbow: 0.03, split: 0.30, knee: b.knee,
+          x: planX, twist: sign * 0.30, z: b.z,
+          grip: 0.24, head: -0.10, y: 0, watch: sign * 0.34 }) },
+      { at: 1.00, ease: 'out', pose: full({
+          lean: -sign * b.lean * 0.90, lift: b.lift * 0.52, crouch: b.crouch * 0.4,
+          arm: 1.34, elbow: 0.14, split: 0.26, knee: b.knee * 0.7,
+          x: planX, twist: sign * 0.26, z: b.z,
+          grip: 0.20, head: 0.04, y: 0, watch: sign * 0.28 }) }
+    ];
+    var out = keyed(keys, p);
+    /* the feint: on Legend he shows you one way before he goes the other */
+    if (feint && p < 0.42) out.x -= sign * 0.30 * (1 - p / 0.42);
+    return out;
+  }
+
+  /* the band and the side, read off the keeper's committed plan */
+  function planShape(){
+    var plan = S.plan || { x: 0, y: 0.4 };
+    var sign = Math.abs(plan.x) < 0.14 ? 0 : (plan.x > 0 ? 1 : -1);
+    var band = plan.y < 0.45 ? 'low' : (plan.y < 0.85 ? 'mid' : 'high');
+    return { plan: plan, sign: sign, band: band,
+             planX: plan.x * (WORLD.GOAL.w / 2) - sign * 0.42 };
+  }
+
+  /* ---- catch: the ball is held, so the fingers close around it ----------- */
+  function poseCatch(band, sign, planX, after){
+    var b = BAND[band] || BAND.mid;
+    return {
+      lean:  -sign * (b.lean * 0.70),
+      lift:  b.lift * 0.62,
+      crouch: 0.05,
+      arm:   1.30 - Math.min(0.45, after * 1.4),     /* the arms draw it in */
+      elbow: 0.42 + Math.min(0.35, after * 0.9),
+      split: 0.24, knee: b.knee * 0.7,
+      twist: sign * 0.22,
+      x: planX, y: 0, z: b.z,
+      grip: Math.min(1, 0.35 + after * 2.4),         /* the fingers close fast */
+      head: -0.24 - Math.min(0.20, after * 0.5), watch: -sign * 0.10
+    };
+  }
+
+  /* ---- deflect: a straight arm, an open hand, the ball going away -------- */
+  function poseDeflect(band, sign, planX, after){
+    var b = BAND[band] || BAND.mid;
+    return {
+      lean:  -sign * (b.lean * 0.86),
+      lift:  b.lift * 0.85,
+      crouch: b.crouch * 0.5,
+      arm:   1.62, elbow: 0.02,
+      split: 0.36, knee: b.knee * 1.05,
+      twist: sign * 0.34,
+      x: planX, y: 0, z: b.z,
+      grip: 0.12,                                    /* a fist, not a hold */
+      head: -0.12, watch: sign * 0.30
+    };
+  }
+
+  /* ---- conceded: beaten. A goal is a slump, a miss he watches go by ------ */
+  function poseConceded(band, sign, planX, after, scored){
+    var b = BAND[band] || BAND.mid;
+    var s = WORLD.clamp(after * 1.2, 0, 1);
+    var slump = scored ? s : s * 0.5;
+    return {
+      lean:  -sign * (b.lean * (1 - slump * 0.45)),
+      lift:  b.lift * (1 - slump * 0.75),
+      crouch: b.crouch + slump * (scored ? 0.75 : 0.20),
+      arm:   (scored ? 1.34 - slump * 1.0 : 1.50 - slump * 0.5),
+      elbow: 0.14 + slump * (scored ? 0.85 : 0.35),
+      split: 0.26 + slump * 0.10,
+      knee:  b.knee + slump * 0.55,
+      twist: -sign * slump * 0.16,
+      x: planX, y: 0, z: b.z,
+      grip: 0.05,
+      head: scored ? 0.10 + slump * 0.45 : -0.20,    /* head down, or up */
+      watch: scored ? -sign * 0.10 * slump : sign * 0.45
+    };
+  }
+
+  /* ---------------------------- drive the rig ----------------------------- */
+  function applyPose(st){
+    var g = keeper.g, diving = (st.state === 'dive' || st.state === 'catch' ||
+                               st.state === 'deflect' || st.state === 'conceded');
+    var sign = Math.abs((S.plan && S.plan.x) || 0) < 0.14 ? 0
+             : ((S.plan.x > 0) ? 1 : -1);
+
+    keeper.root.position.set(A.x, A.lift + A.y, A.z);
     keeper.root.rotation.set(0, A.twist, A.lean);
     g.hips.rotation.z = -A.lean * 0.18;
     g.chest.rotation.z = -A.lean * 0.12;
     g.chest.rotation.x = A.crouch;
-    g.neck.rotation.x = -A.crouch * 0.55 + (diving ? -0.18 : 0);
+    g.neck.rotation.x = -A.crouch * 0.42 + A.head;
     g.neck.rotation.z = -A.lean * 0.10;
+    g.neck.rotation.y = A.watch;
 
-    /* arms: the leading glove reaches for where the ball is going */
+    /* arms: the leading glove reaches for where the ball is going, and the
+       fingers close around it when he has it */
     ['l', 'r'].forEach(function(side){
       var s = side === 'l' ? -1 : 1;
       var lead = sign === 0 ? 0 : (s === sign ? 1 : 0.55);
       var arm = g.arm[side];
       arm.sh.rotation.z = -s * (A.arm * (0.55 + lead * 0.75));
-      arm.sh.rotation.x = A.arm * (0.30 + lead * 0.5) * (diving ? 1 : 0.4);
+      arm.sh.rotation.x = A.arm * (0.26 + lead * 0.5) * (diving ? 1 : 0.4);
       arm.el.rotation.z = -s * A.elbow;
       arm.el.rotation.x = diving ? lead * -0.35 : -A.elbow * 0.4;
+      var h = g.hand[side], close = WORLD.clamp(A.grip, 0, 1);
+      for (var f = 0; f < h.fingers.length; f++){
+        h.fingers[f].rotation.x = -0.45 - close * 1.35;
+      }
+      h.thumb.rotation.z = -s * (0.70 + close * 0.30);
     });
 
     /* legs: the trailing leg straightens, the leading knee folds */
@@ -679,7 +940,50 @@ var Renderer3D = (function(){
       leg.hip.rotation.z = -s * A.split * (diving ? 1.6 : 1);
       leg.hip.rotation.x = diving ? (trail ? -0.55 : 0.35) : -A.crouch * 0.5;
       leg.knee.rotation.x = diving ? (trail ? 0.15 : A.knee * 1.6) : A.knee;
+      leg.foot.rotation.x = diving ? (trail ? 0.35 : -0.18) : 0;
     });
+
+    /* the ball is about to be read off a glove, so bring the rig up to date */
+    keeper.root.updateMatrixWorld(true);
+  }
+
+  function keeperPose(dt){
+    var v = S.shot ? S.shot.verdict : null;
+    var after = ball ? (ball.after || 0) : 0;
+    var st = WORLD.keeperState({
+      phase: S.phase, plan: S.plan, t: S.flight.t, dur: S.flight.dur,
+      verdict: v, saveType: S.shot ? S.shot.saveType : null
+    });
+
+    var sh = planShape();
+    var sign = sh.sign, band = sh.band, planX = sh.planX;
+    var tgt;
+    if (st.state === 'scan') tgt = poseScan();
+    else if (st.state === 'dive') tgt = poseDive(band, sign, planX, st.p);
+    else if (st.state === 'catch') tgt = full(poseCatch(band, sign, planX, after));
+    else if (st.state === 'deflect') tgt = full(poseDeflect(band, sign, planX, after));
+    else if (st.state === 'conceded'){
+      tgt = full(poseConceded(band, sign, planX, after, v === 'goal'));
+    } else tgt = poseIdle();
+
+    /* how fast he gets there: a dive is violent, a slump is slow */
+    var rate = (st.state === 'dive') ? 13
+             : (st.state === 'idle') ? 4.5
+             : (st.state === 'scan') ? 6 : 7;
+    for (var i = 0; i < CHANNELS.length; i++){
+      var c = CHANNELS[i];
+      A[c] = approach(A[c], tgt[c], rate, dt);
+    }
+    applyPose(st);
+    keeper.state = st;
+    return st;
+  }
+
+  /* where a glove actually is in the world, for parenting the held ball */
+  function gloveWorld(side, out){
+    var arm = keeper && keeper.g.arm[side || 'l'];
+    if (!arm) return out.set(0, 0.3, 0.35);
+    return out.setFromMatrixPosition(arm.glove.matrixWorld);
   }
 
   /* -------------------------------- the ball -------------------------------- */
@@ -892,6 +1196,9 @@ var Renderer3D = (function(){
       ball.trail.forEach(function(s){ s.visible = false; s.material.opacity = 0; });
       return;
     }
+    /* once the verdict is in, the ball is a free body and the aftermath owns
+       it (or it is held in a glove) — see ballAftermath */
+    if (ph === 'result') return;
 
     var p = WORLD.positionAt(S.flight.t, currentCross(), S.flight.curve, S.shot ? S.shot.power : 0.6);
     ball.mesh.position.set(p.x, p.y, p.z);
@@ -922,7 +1229,7 @@ var Renderer3D = (function(){
      the goal once the ball is in. The camera is what makes it feel 3D.       */
   var CAM = { mode: 'aim', t: 0, lastPhase: 'aim', punch: 0 };
   /* three.js is not loaded until init(), so nothing may touch T up here */
-  var camPos, camLook, tmpA, tmpB;
+  var camPos, camLook, tmpA, tmpB, tmpC;
   function easeOutLocal(x){ return 1 - Math.pow(1 - x, 3); }
 
   function cameraUpdate(dt){
@@ -1184,6 +1491,7 @@ var Renderer3D = (function(){
     camLook = new T.Vector3(0, 1.2, 0.2);
     tmpA = new T.Vector3();
     tmpB = new T.Vector3();
+    tmpC = new T.Vector3();            /* the glove the ball is held in */
 
     buildSky();
     buildPitch();
@@ -1205,41 +1513,98 @@ var Renderer3D = (function(){
     return true;
   }
 
-  /* ------------------------- what happens after the shot --------------------
-     The sim freezes the ball the moment the verdict is in; the aftermath is
-     staging, so it lives here: the ball settling in the net, dropping after a
-     save, or thudding into the boards after a miss.                          */
+  /* --------------------- what happens after the shot ------------------------
+     The verdict decides the outcome; the physics decides the picture. The ball
+     keeps the velocity it actually had at the line and becomes a free body:
+     the mesh strips its pace and holds it, a parry loops away from the goal,
+     a miss lands behind the line. The one case that is not a free body is a
+     clean catch — there the ball is parented to the glove that caught it.   */
   var ended = false;
+
+  /* the ball's velocity as it arrives, differentiated from the very path that
+     has been drawn all flight, so the aftermath continues the motion rather
+     than restarting it */
+  function crossingVelocity(){
+    var c = currentCross();
+    var pw = S.shot ? S.shot.power : 0.6;
+    var a = WORLD.positionAt(1, c, S.flight.curve, pw);
+    var b = WORLD.positionAt(0.96, c, S.flight.curve, pw);
+    var dt = 0.04 * Math.max(S.flight.dur, 0.2);
+    return { x: (a.x - b.x) / dt, y: (a.y - b.y) / dt, z: (a.z - b.z) / dt };
+  }
+
+  function startBall(){
+    var c = currentCross();
+    var v = crossingVelocity();
+    /* the crossing plane *is* the goal line, so z starts at 0: currentCross()
+       is a 2D point on that plane and has no z of its own */
+    ball.p = { x: c.x, y: c.y, z: 0, vx: v.x, vy: v.y, vz: v.z };
+    ball.catchFrom = null;
+    ball.netDone = false;
+
+    var verdict = S.shot ? S.shot.verdict : 'goal';
+    if (verdict === 'post'){
+      /* the woodwork hits back: it throws the ball out and across */
+      var sx = (c.x < 0 ? -1 : 1);
+      if (S.shot.hit === 'bar'){
+        ball.p.vy = -Math.abs(v.y) * 0.35 - 1.6;
+        ball.p.vz = Math.abs(v.z) * 0.42;
+        ball.p.vx = sx * 0.9;
+      } else {
+        ball.p.vx = sx * (Math.abs(v.x) * 0.5 + 2.2);
+        ball.p.vz = Math.abs(v.z) * 0.45;
+        ball.p.vy = Math.abs(v.y) * 0.30 + 1.4;
+      }
+      ballEvent('post');
+    } else if (verdict === 'saved' && S.shot && S.shot.saveType === 'deflect'){
+      /* the parry is computed from where the glove met the ball, then the
+         physics takes over: what you see fly away is what the rules deflected */
+      var d = WORLD.deflecting(c, S.plan || { x: 0, y: 0.4 },
+                               S.shot.power, S.shot.pace);
+      ball.p.x = d.contact.x; ball.p.y = d.contact.y; ball.p.z = d.contact.z;
+      ball.p.vx = d.v.x; ball.p.vy = d.v.y; ball.p.vz = d.v.z;
+    } else if (verdict === 'saved'){
+      /* a catch: remember where he took it on the goal line, so it is drawn
+         into the glove rather than teleporting there */
+      ball.catchFrom = new T.Vector3(c.x, c.y, 0);
+    }
+  }
+
+  /* a caught ball is held: parented to the glove that caught it */
+  function holdInGlove(dt){
+    var side = (S.plan && S.plan.x > 0.14) ? 'r' : 'l';
+    gloveWorld(side, tmpC);
+    tmpC.y -= 0.07;                          /* cupped under the palm */
+    var t = Math.min(1, (ball.after || 0) / 0.09);
+    if (t < 1 && ball.catchFrom) ball.mesh.position.lerpVectors(ball.catchFrom, tmpC, t);
+    else ball.mesh.position.copy(tmpC);
+    ball.mesh.rotation.y += dt * 2.2;
+    ball.trail.forEach(function(sp){ sp.visible = false; sp.material.opacity = 0; });
+  }
 
   function aftermath(dt){
     if (!ball) return;
-    var v = S.shot ? S.shot.verdict : 'goal';
-    var c = currentCross();
-    var p = WORLD.positionAt(1, c, S.flight.curve, S.shot ? S.shot.power : 0.5);
     ball.after = (ball.after || 0) + dt;
-    var t = ball.after, y = p.y, z = p.z, x = p.x;
+    /* build the ball's physics state first, for every verdict: even a catch
+       needs to know where the ball was taken, so it can be drawn into the
+       glove over a few frames instead of popping there */
+    if (!ball.p) startBall();
 
-    if (v === 'wide' || v === 'over'){
-      var sp = 11, k = Math.min(1, t / 0.6);
-      x += (p.x < 0 ? -1 : 1) * sp * k;
-      y = Math.max(0.11, p.y + (v === 'over' ? 1.6 : -1.2) * k - 3.2 * k * k);
-      z = Math.max(-6.4, -6.4 * k);
-    } else if (v === 'post'){
-      var k2 = Math.min(1, t / 0.7);
-      x = p.x + (p.x < 0 ? -1 : 1) * 5.5 * k2;
-      y = Math.max(0.11, p.y + 1.1 * k2 - 4.0 * k2 * k2);
-      z = p.z + 7.5 * k2;
-    } else if (v === 'saved'){
-      var k3 = Math.min(1, t / 0.55);
-      y = Math.max(0.11, p.y - 5.0 * k3 * k3);
-      z = p.z + 1.6 * k3;
-      x = p.x + 0.9 * k3 * (p.x < 0 ? -1 : 1);
-    } else {
-      var k4 = Math.min(1, t / 0.5);
-      z = p.z - 0.50 * k4;
-      y = Math.max(0.11, p.y - 2.4 * k4 * k4);
+    var v = S.shot ? S.shot.verdict : 'goal';
+    if (v === 'saved' && S.shot && S.shot.saveType === 'catch'){
+      holdInGlove(dt);
+      return;
     }
-    ball.mesh.position.set(x, y, z);
+
+    var ev = WORLD.ballStep(ball.p, dt);
+    if (ev.net && !ball.netDone){
+      ball.netDone = true;
+      /* the net dents where the ball hit it, and the mesh gives up its sound
+         at exactly that moment */
+      netImpact(ball.p.x, ball.p.y);
+      ballEvent('net', { speed: ev.net });
+    }
+    ball.mesh.position.set(ball.p.x, ball.p.y, ball.p.z);
     ball.mesh.rotation.z += dt * 6;
     ball.mesh.rotation.x += dt * 3;
     ball.trail.forEach(function(sp){ sp.visible = false; sp.material.opacity = 0; });
@@ -1383,18 +1748,18 @@ var Renderer3D = (function(){
     if (!ready) return;
     if (!S.reduce) S.timeScale = (S.phase === 'result') ? 0.42 : 1;
 
-    /* the instant the verdict lands: dent the net, throw the confetti */
+    /* the instant the verdict lands: drop the ball into physics and cheer */
     if (S.phase === 'result' && !ended){
       ended = true;
       ball.after = 0;
+      ball.p = null;                     /* the aftermath builds it fresh */
       var v = S.shot ? S.shot.verdict : '';
-      var mx = S.shot ? S.shot.x * (WORLD.GOAL.w / 2) : 0;
-      var my = S.shot ? S.shot.y * WORLD.GOAL.h : 0;
-      if (v === 'goal'){ netImpact(mx, my); confettiBurst(); }
-      else if (v === 'post'){ netImpact(mx * 0.85, my); }
+      /* the net dents when the ball actually reaches it, from the physics —
+         the confetti, which is pure celebration, can go now */
+      if (v === 'goal') confettiBurst();
     } else if (S.phase !== 'result'){
       ended = false;
-      if (ball) ball.after = 0;
+      if (ball){ ball.after = 0; ball.p = null; }
     }
 
     keeperPose(dt);
@@ -1428,10 +1793,13 @@ var Renderer3D = (function(){
   function reset(){
     CAM.mode = 'aim'; CAM.t = 0; CAM.lastPhase = 'aim'; CAM.punch = 0;
     ended = false;
-    A.x = 0; A.lift = 0; A.lean = 0; A.feint = 0;
+    A.x = 0; A.lift = 0; A.lean = 0; A.y = 0; A.grip = 0.05;
     if (confetti) confetti.mesh.visible = false;
     if (net){ net.userData.hit = null; net.userData.dirty = true; }
-    if (ball){ ball.hist.length = 0; ball.after = 0; }
+    if (ball){
+      ball.hist.length = 0; ball.after = 0;
+      ball.p = null; ball.catchFrom = null; ball.netDone = false;
+    }
     if (!S.reduce) S.timeScale = 1;
   }
 
@@ -1454,7 +1822,23 @@ var Renderer3D = (function(){
     state: function(){
       return { mode: CAM.mode, ready: ready, dead: dead, q: Q,
                keeperX: keeper ? keeper.root.position.x : 0,
+               keeper: (keeper && keeper.state) ? keeper.state.key : null,
+               keeperGrip: +A.grip.toFixed(2),
                ball: ball ? [ball.mesh.position.x, ball.mesh.position.y, ball.mesh.position.z] : null,
+               /* is the ball actually in the goal pocket, by the world model? */
+               inNet: (ball && ball.p) ? WORLD.inNet(ball.p) : false,
+               phys: ball && ball.p ? { x: ball.p.x, y: ball.p.y, z: ball.p.z,
+                                        vz: ball.p.vz } : null,
+               vel: ball && ball.p ? { x: ball.p.vx, y: ball.p.vy, z: ball.p.vz } : null,
+               catchFrom: ball && ball.catchFrom
+                 ? [ball.catchFrom.x, ball.catchFrom.y, ball.catchFrom.z] : null,
+               /* where the gloves are: a held ball must sit on one of them */
+               gloves: (keeper && keeper.root)
+                 ? ['l', 'r'].map(function(sd){
+                     gloveWorld(sd, tmpA); return [+tmpA.x.toFixed(3), +tmpA.y.toFixed(3),
+                                                   +tmpA.z.toFixed(3)];
+                   }) : null,
+               held: !!(ball && ball.catchFrom && ball.after > 0.1),
                net: net && net.userData.hit ? net.userData.hit.t : null,
                confetti: confetti ? confetti.mesh.visible : false,
                crowd: crowd ? crowd.count : 0 };

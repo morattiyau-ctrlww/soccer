@@ -168,59 +168,130 @@ function drawGoal(g, ripple){
   c.stroke();
   c.lineCap = 'butt';
 }
-/* -------------------------- keeper / ball / fx -------------------------- */
+/* -------------------------- keeper / ball / fx --------------------------
+   The flat keeper reads the same state machine as the 3D rig
+   (WORLD.keeperState), so the fallback can never do something the stadium
+   would not: idle, scan, dive_low/mid/high left or right, catch, deflect,
+   conceded. The poses are hand-tuned in screen space, the *state* is shared. */
+function keeperPose2D(k, p){
+  /* k = {state, side, band, p}; returns screen-space pose numbers */
+  var bandLean = k.band === 'low' ? 0.95 : (k.band === 'mid' ? 0.78 : 0.55);
+  var out = { lean: 0, feet: 0, hands: 0.42, spread: 18, crouch: 0,
+              handY: -74, headTilt: 0, apart: 0 };
+  if (k.state === 'idle'){
+    var t = S.time;
+    out.feet = Math.abs(Math.sin(t * 2.3)) * 3;
+    out.lean = Math.sin(t * 1.15) * 0.05;
+    out.crouch = 6 + Math.sin(t * 2.3) * 2;
+    out.hands = 0.55 + Math.sin(t * 2.3 + 1.1) * 0.05;
+  } else if (k.state === 'scan'){
+    var side = S.aim.x < -0.1 ? -1 : (S.aim.x > 0.1 ? 1 : 0);
+    out.lean = side * 0.10;
+    out.crouch = 12 + S.power * 10;
+    out.hands = 0.70 + S.power * 0.12;
+    out.spread = 22;
+    out.apart = side * 6;
+  } else if (k.state === 'dive'){
+    var e = p;
+    out.lean = -k.side * bandLean * (0.35 + 0.65 * e);
+    out.hands = 1.35 * e + 0.3;
+    out.spread = 18 + 30 * e;
+    out.crouch = -8 * e;
+    out.handY = -74 + (k.band === 'high' ? -22 : (k.band === 'mid' ? -10 : 7)) * e;
+    out.apart = k.side * 26 * e;
+    out.feet = 4 + 14 * e;
+  } else if (k.state === 'catch'){
+    out.lean = -k.side * bandLean * 0.7;
+    out.hands = 1.05; out.spread = 13; out.apart = k.side * 18;
+    out.handY = -92; out.crouch = 4;
+  } else if (k.state === 'deflect'){
+    out.lean = -k.side * bandLean * 0.85;
+    out.hands = 1.5; out.spread = 34; out.apart = k.side * 22;
+    out.handY = -86;
+  } else if (k.state === 'conceded'){
+    out.lean = -k.side * bandLean * 0.45;
+    out.crouch = 22; out.hands = 0.30; out.spread = 26;
+    out.headTilt = 1; out.apart = k.side * 10;
+  }
+  return out;
+}
+
 function drawKeeper(g){
   var c = D.ctx;
   var feetY = g.goalBottomY + 1;
   var bodyH = g.goalH * 0.74;
   var kx = g.cx + S.keeper.px;
   var ky = feetY - S.keeper.py * g.goalH * 0.42;
-  var p = S.keeper.t;
-  var lean = (S.plan ? (S.plan.dir || 0) : 0) * p;
+  var st = WORLD.keeperState({
+    phase: S.phase, plan: S.plan, t: S.flight.t, dur: S.flight.dur,
+    verdict: S.shot ? S.shot.verdict : null,
+    saveType: S.shot ? S.shot.saveType : null
+  });
+  var pose = keeperPose2D(st, st.state === 'dive' ? st.p : 0);
+  var s = bodyH / 100;
 
   c.save();
-  c.translate(kx, ky);
-  c.rotate(lean * 0.85);
-  var s = bodyH / 100;
+  c.translate(kx + pose.apart * s, ky - pose.feet * s);
+  c.rotate(pose.lean);
 
   /* shadow */
   c.fillStyle = 'rgba(0,0,0,.35)';
   c.beginPath(); c.ellipse(0, 2, 26 * s, 7 * s, 0, 0, 6.29); c.fill();
 
+  var sq = 1 + pose.crouch * 0.004;
   /* legs */
   c.fillStyle = '#1b2a4a';
-  c.fillRect(-13 * s, -42 * s, 10 * s, 42 * s);
-  c.fillRect(3 * s, -42 * s, 10 * s, 42 * s);
+  c.fillRect(-13 * s, -42 * s * sq, 10 * s, 42 * s * sq);
+  c.fillRect(3 * s, -42 * s * sq, 10 * s, 42 * s * sq);
+  c.fillStyle = '#22304d';
+  c.fillRect(-13 * s, -42 * s * sq, 10 * s, 26 * s);
+  c.fillRect(3 * s, -42 * s * sq, 10 * s, 26 * s);
+  /* cleats */
   c.fillStyle = '#0d1626';
-  c.fillRect(-14 * s, -4 * s, 12 * s, 5 * s);
-  c.fillRect(2 * s, -4 * s, 12 * s, 5 * s);
+  c.fillRect(-14.5 * s, -5 * s, 13 * s, 5 * s);
+  c.fillRect(1.5 * s, -5 * s, 13 * s, 5 * s);
+  c.fillStyle = '#f2f5fa';
+  c.fillRect(-14.5 * s, -1.4 * s, 13 * s, 1.4 * s);
+  c.fillRect(1.5 * s, -1.4 * s, 13 * s, 1.4 * s);
 
-  /* body */
-  var jersey = c.createLinearGradient(0, -86 * s, 0, -38 * s);
+  /* body: a tapered jersey with a collar, not a rectangle */
+  var topY = -80 * s * sq, botY = -36 * s * sq;
+  var jersey = c.createLinearGradient(0, topY, 0, botY);
   jersey.addColorStop(0, '#ffd166'); jersey.addColorStop(1, '#ff9f1c');
   c.fillStyle = jersey;
   c.beginPath();
-  c.moveTo(-20 * s, -80 * s); c.lineTo(20 * s, -80 * s);
-  c.lineTo(16 * s, -36 * s); c.lineTo(-16 * s, -36 * s);
+  c.moveTo(-21 * s, topY);
+  c.lineTo(21 * s, topY);
+  c.lineTo(15 * s, botY);
+  c.lineTo(-15 * s, botY);
   c.closePath(); c.fill();
+  c.fillStyle = '#141b2b';
+  c.fillRect(-6 * s, topY - 2 * s, 12 * s, 4 * s);            /* collar */
 
   /* arms */
+  var handX = pose.spread, handY = pose.handY;
   c.strokeStyle = '#ffd166'; c.lineWidth = 9 * s; c.lineCap = 'round';
-  var spread = 18 + p * 34;
-  c.beginPath(); c.moveTo(-16 * s, -74 * s);
-  c.lineTo(-spread * s, (-74 + p * 26) * s); c.stroke();
-  c.beginPath(); c.moveTo(16 * s, -74 * s);
-  c.lineTo(spread * s, (-74 + p * 26) * s); c.stroke();
+  c.beginPath(); c.moveTo(-18 * s, -72 * s); c.lineTo(-handX * s, handY * s); c.stroke();
+  c.beginPath(); c.moveTo(18 * s, -72 * s); c.lineTo(handX * s, handY * s); c.stroke();
   /* gloves */
   c.fillStyle = '#2ec4b6';
-  c.beginPath(); c.arc(-spread * s, (-74 + p * 26) * s, 7.5 * s, 0, 6.29); c.fill();
-  c.beginPath(); c.arc(spread * s, (-74 + p * 26) * s, 7.5 * s, 0, 6.29); c.fill();
+  c.beginPath(); c.arc(-handX * s, handY * s, 8 * s, 0, 6.29); c.fill();
+  c.beginPath(); c.arc(handX * s, handY * s, 8 * s, 0, 6.29); c.fill();
 
-  /* head */
+  /* head, with a hint of a face so the mood reads */
+  var headY = -92 * s * sq;
   c.fillStyle = '#f2c9a0';
-  c.beginPath(); c.arc(0, -92 * s, 12 * s, 0, 6.29); c.fill();
-  c.fillStyle = '#22304a';
-  c.beginPath(); c.arc(0, -96 * s, 12 * s, Math.PI, 2 * Math.PI); c.fill();
+  c.beginPath(); c.arc(0, headY, 12 * s, 0, 6.29); c.fill();
+  c.fillStyle = '#1d2433';
+  c.beginPath(); c.arc(0, headY - 4 * s, 12 * s, Math.PI, 2 * Math.PI); c.fill();
+  c.fillStyle = '#101826';
+  if (pose.headTilt){
+    /* head down: no eyes, he is looking at the grass */
+    c.fillRect(-6 * s, headY + 2 * s, 12 * s, 1.6 * s);
+  } else {
+    c.beginPath(); c.arc(-4 * s, headY + 1 * s, 1.7 * s, 0, 6.29); c.fill();
+    c.beginPath(); c.arc(4 * s, headY + 1 * s, 1.7 * s, 0, 6.29); c.fill();
+  }
 
   c.restore();
 }

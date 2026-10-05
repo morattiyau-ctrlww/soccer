@@ -276,5 +276,261 @@ console.log('\n7. the reader (the AI you can see working)');
         badExpect);
 })();
 
+console.log('\n7. the keeper\'s animation states');
+(function(){
+  var W = require(path.join(__dirname, '..', 'world.js'));
+
+  check('every state the brief asks for exists',
+        ['idle', 'scan', 'dive_low', 'dive_mid', 'dive_high',
+         'catch', 'deflect', 'conceded'].every(function(s){
+           return W.KEEPER_STATES.indexOf(s) >= 0;
+         }), W.KEEPER_STATES);
+
+  var mkPlan = function(x, y){ return { x: x, y: y, react: 0.2 }; };
+
+  check('he is idle while you stand over the ball',
+        W.keeperState({ phase: 'aim' }).state === 'idle',
+        W.keeperState({ phase: 'aim' }).key);
+  check('he is scanning while you charge power',
+        W.keeperState({ phase: 'charging' }).state === 'scan',
+        W.keeperState({ phase: 'charging' }).key);
+
+  /* the dive must carry the side and the height, so the right pose plays */
+  var lowL = W.keeperState({ phase: 'flying', plan: mkPlan(-0.7, 0.2), t: 0.6, dur: 0.6 });
+  var highR = W.keeperState({ phase: 'flying', plan: mkPlan(0.7, 0.9), t: 0.6, dur: 0.6 });
+  var midR = W.keeperState({ phase: 'flying', plan: mkPlan(0.7, 0.6), t: 0.6, dur: 0.6 });
+  check('a low dive to the left is dive_low_left', lowL.key === 'dive_low_left', lowL.key);
+  check('a high dive to the right is dive_high_right', highR.key === 'dive_high_right', highR.key);
+  check('a middle-height dive is its own state', midR.key === 'dive_mid_right', midR.key);
+
+  /* the reaction delay is honoured: he does not dive before he commits */
+  check('he is still scanning during his reaction delay',
+        W.keeperState({ phase: 'flying', plan: mkPlan(0.7, 0.3), t: 0.05, dur: 0.6 })
+          .state === 'scan',
+        W.keeperState({ phase: 'flying', plan: mkPlan(0.7, 0.3), t: 0.05, dur: 0.6 }).key);
+
+  check('a clean catch plays the catch state',
+        W.keeperState({ phase: 'result', verdict: 'saved', saveType: 'catch',
+                        plan: mkPlan(-0.7, 0.2) }).state === 'catch');
+  check('a parry plays the deflect state',
+        W.keeperState({ phase: 'result', verdict: 'saved', saveType: 'deflect',
+                        plan: mkPlan(0.7, 0.2) }).state === 'deflect');
+  check('a goal plays the conceded state',
+        W.keeperState({ phase: 'result', verdict: 'goal',
+                        plan: mkPlan(0.7, 0.2) }).state === 'conceded');
+  check('a miss he stretched for is conceded too',
+        W.keeperState({ phase: 'result', verdict: 'post',
+                        plan: mkPlan(0.7, 0.2) }).state === 'conceded');
+
+  /* the state must be derived from the same plan the rules scored against */
+  var mismatch = 0;
+  for (var q = 0; q < 500; q++){
+    var plan = LOGIC.keeperPlan([], 'normal');
+    var st = W.keeperState({ phase: 'flying', plan: plan, t: 0.9, dur: 0.6 });
+    var side = Math.abs(plan.x) < 0.14 ? 'centre' : (plan.x > 0 ? 'right' : 'left');
+    var band = plan.y < 0.45 ? 'low' : (plan.y < 0.85 ? 'mid' : 'high');
+    if (st.key !== 'dive_' + band + '_' + side) mismatch++;
+  }
+  check('the dive you see is the dive the rules scored against', mismatch === 0,
+        mismatch);
+})();
+
+console.log('\n8. catch and parry: the save is a rule, not a flourish');
+(function(){
+  var W = require(path.join(__dirname, '..', 'world.js'));
+  var reach = { x: 0.38, y: 0.38 };
+
+  check('a shot into the middle of his body is caught',
+        W.saveTypeFor(0.02, 0.02, reach, 0.5) === 'catch');
+  check('a fingertip save at the edge of his reach is parried',
+        W.saveTypeFor(0.37, 0.37, reach, 0.5) === 'deflect');
+  check('a rocket is harder to hold than a pass-back',
+        W.saveTypeFor(0.16, 0.16, reach, 1.0) === 'deflect' &&
+        W.saveTypeFor(0.16, 0.16, reach, 0.2) === 'catch',
+        { hard: W.saveTypeFor(0.16, 0.16, reach, 1.0),
+          soft: W.saveTypeFor(0.16, 0.16, reach, 0.2) });
+
+  /* every save must be exactly one of the two kinds, and only saves have one */
+  var bad = 0, kinds = { catch: 0, deflect: 0 }, saves = 0;
+  for (var i = 0; i < 4000; i++){
+    var keeper = LOGIC.keeperPlan([], 'normal');
+    var r = LOGIC.resolveShot({ x: -1 + 2 * Math.random(), y: Math.random() },
+                              Math.random(), keeper, 'normal');
+    if (r.verdict === 'saved'){
+      saves++;
+      if (r.saveType !== 'catch' && r.saveType !== 'deflect') bad++;
+      else kinds[r.saveType]++;
+    } else if (r.saveType !== null) bad++;
+  }
+  check('every save is a catch or a parry, and nothing else is either',
+        bad === 0 && saves > 100 && kinds.catch > 0 && kinds.deflect > 0,
+        { bad: bad, saves: saves, kinds: kinds });
+})();
+
+console.log('\n8b. the parry is computed from the contact, and never scores');
+(function(){
+  var W = require(path.join(__dirname, '..', 'world.js'));
+
+  var outOfGoal = 0, minZ = 99, escapes = 0;
+  for (var k = 0; k < 400; k++){
+    var plan = LOGIC.keeperPlan([], 'legend');
+    var cross = { x: plan.x * 3.66, y: plan.y * 2.44 };
+    var d = W.deflecting(cross, plan, 0.4 + Math.random() * 0.6,
+                         12 + Math.random() * 20);
+    if (d.v.z <= 0) outOfGoal++;
+    /* then let the physics run: a parried ball may never end up in the net */
+    var b = { x: d.contact.x, y: d.contact.y, z: d.contact.z,
+              vx: d.v.x, vy: d.v.y, vz: d.v.z };
+    var lo = b.z;
+    for (var s = 0; s < 240; s++){ W.ballStep(b, 1 / 60); lo = Math.min(lo, b.z); }
+    minZ = Math.min(minZ, lo);
+    if (W.inNet(b)) escapes++;
+  }
+  check('a parried ball always leaves away from the goal face', outOfGoal === 0,
+        outOfGoal);
+  check('a parried ball never crosses the goal line, let alone the net',
+        escapes === 0 && minZ > 0, { escapes: escapes, minZ: minZ });
+
+  /* a fingertip on a ball above him tips it over the bar */
+  var hi = W.deflecting({ x: 0.6, y: 2.35 }, { x: 0.78, y: 0.72 }, 0.9, 26);
+  var hb = { x: hi.contact.x, y: hi.contact.y, z: hi.contact.z,
+             vx: hi.v.x, vy: hi.v.y, vz: hi.v.z };
+  var apex = hb.y;
+  for (var t2 = 0; t2 < 300; t2++){ W.ballStep(hb, 1 / 60); apex = Math.max(apex, hb.y); }
+  check('a tip at full vertical stretch goes over the crossbar',
+        apex > W.GOAL.h, { apex: apex, bar: W.GOAL.h });
+
+  /* and the contact point is where a glove could actually be */
+  var far = 0, low = 0;
+  for (var q = 0; q < 400; q++){
+    var p2 = LOGIC.keeperPlan([], 'legend');
+    var c2 = W.contactPoint({ x: 0, y: 1.2 }, p2);
+    var centre = W.diveCentre(p2);
+    if (Math.abs(c2.x - centre.x) > W.GLOVE.out + 1e-9) far++;
+    if (c2.y < W.BALL.r - 1e-9) low++;
+  }
+  check('the glove only ever meets the ball inside its own reach', far === 0, far);
+  check('a save never contacts the ball below the grass', low === 0, low);
+})();
+
+console.log('\n9. the net: a goal is a ball that reaches the mesh and stays');
+(function(){
+  var W = require(path.join(__dirname, '..', 'world.js'));
+
+  /* fly real goal-bound shots into the net and watch where they settle */
+  var through = 0, notInNet = 0, notSettled = 0, inMidAir = 0, hitNet = 0, n = 0;
+  for (var i = 0; i < 300; i++){
+    var r = LOGIC.resolveShot({ x: -0.95 + 1.9 * Math.random(), y: Math.random() },
+                              CFG.SWEET, { x: 9, y: 9 }, 'easy');
+    if (r.verdict !== 'goal') continue;
+    n++;
+    var cross = { x: r.x * 3.66, y: r.y * 2.44 };
+    var a = W.positionAt(1, cross, 0, r.power);
+    var b0 = W.positionAt(0.96, cross, 0, r.power);
+    var dtv = 0.04 * Math.max(CFG.FLIGHT * r.speed, 0.2);
+    var b = { x: a.x, y: a.y, z: 0,
+              vx: (a.x - b0.x) / dtv, vy: (a.y - b0.y) / dtv, vz: (a.z - b0.z) / dtv };
+    var imp = 0;
+    for (var s = 0; s < 900; s++){
+      var ev = W.ballStep(b, 1 / 60);
+      if (ev.net && !imp) imp = ev.net;
+      if (b.z < -W.GOAL.depth + 0.005) through++;
+    }
+    if (imp) hitNet++;
+    if (!W.inNet(b)) notInNet++;
+    /* it must be lying on the grass, not hanging in the air */
+    var speed = Math.abs(b.vx) + Math.abs(b.vz);
+    if (speed > 0.02 || b.vy !== 0) notSettled++;
+    if (b.y > W.BALL.r + 1e-6) inMidAir++;
+  }
+  check('a scored ball always hits the mesh', n > 100 && hitNet === n,
+        hitNet + '/' + n);
+  check('the ball never passes through the net', through === 0, through);
+  check('the ball ends up in the pocket, not in front of the line',
+        notInNet === 0, notInNet);
+  check('the ball comes to rest instead of stopping dead in mid-air',
+        notSettled === 0, notSettled);
+  check('it falls to the grass inside the net, it does not hang there',
+        inMidAir === 0, inMidAir);
+
+  /* the mesh absorbs: it must not spit the ball back out of the goal */
+  var outAgain = 0;
+  for (var k = 0; k < 200; k++){
+    var bk = { x: 1.2, y: 1.4, z: 0.4, vx: 0, vy: 0, vz: -22 };
+    var hit = 0;
+    for (var s2 = 0; s2 < 600; s2++){
+      var e2 = W.ballStep(bk, 1 / 60);
+      if (e2.net) hit = 1;
+      if (hit && bk.z > 0) outAgain++;        /* back out in front of the line */
+    }
+    if (!W.inNet(bk)) outAgain++;
+  }
+  check('the net never kicks the ball back out of the goal', outAgain === 0,
+        outAgain);
+
+  var impact = 0, rebound = 0;
+  var bb = { x: 0, y: 1.2, z: 0.3, vx: 0, vy: 0, vz: -24 };
+  for (var s3 = 0; s3 < 200; s3++){
+    var e3 = W.ballStep(bb, 1 / 60);
+    if (e3.net){ impact = e3.net; rebound = bb.vz; break; }
+  }
+  check('the mesh gives back a fraction of the pace, not all of it',
+        impact > 20 && rebound > 0 && rebound < impact * 0.25,
+        { impact: impact, rebound: rebound });
+})();
+
+console.log('\n10. the sound engine: headroom, and no voice can clip');
+(function(){
+  var A = mod.AUDIO, S = mod.Sound;
+  check('the mix spec is exported so it can be checked without a browser',
+        !!A && !!A.limiter && !!A.buses && !!A.peak, Object.keys(A || {}).length);
+
+  var over = Object.keys(A.peak).filter(function(k){ return A.peak[k] > 1; });
+  check('no voice can clip on its own (every voice peak is <= 1)',
+        over.length === 0, over);
+  check('the master gain leaves the limiter somewhere to work',
+        A.master > 0 && A.master <= 1, A.master);
+
+  check('there is a real brick wall on the output',
+        A.limiter.threshold < 0 && A.limiter.ratio >= 10 && A.limiter.attack <= 0.01,
+        A.limiter);
+  check('a gentle glue compressor sits before the limiter',
+        A.glue.ratio > 1 && A.glue.ratio < A.limiter.ratio &&
+        A.glue.threshold < A.limiter.threshold, A.glue);
+
+  var busOver = Object.keys(A.buses).filter(function(k){ return A.buses[k] > 1; });
+  check('no bus is driven above unity', busOver.length === 0, A.buses);
+  check('the crowd bus sits under the effects it has to compete with',
+        A.buses.crowd < A.buses.sfx, A.buses);
+  check('the UI bus is the quietest thing in the mix',
+        A.buses.ui < A.buses.crowd, A.buses);
+
+  /* the band limit is what stops the old white-noise hiss coming back */
+  check('noise is band-limited above the rumble and below the fizz',
+        A.noiseBand.lo >= 120 && A.noiseBand.hi <= 8000, A.noiseBand);
+  check('the whole mix is high-passed and gently rolled off',
+        A.hp >= 20 && A.lp <= 20000, [A.hp, A.lp]);
+  check('the voice count is bounded, so a burst cannot pile up',
+        A.maxVoices > 4 && A.maxVoices <= 32, A.maxVoices);
+  check('muting ramps rather than cuts, so toggling never pops',
+        A.fadeMs > 0, A.fadeMs);
+
+  /* every voice must be a safe no-op with no Web Audio present at all */
+  var threw = null;
+  try {
+    S.wake();
+    ['kick', 'step', 'net', 'save', 'parry', 'post', 'whistle', 'cheer',
+     'groan', 'charge'].forEach(function(name){ S[name](0.5); });
+    S.set(false); S.set(true);
+  } catch (e){ threw = String((e && e.message) || e); }
+  check('every voice is a no-op under node, never a crash', threw === null, threw);
+  check('nothing is left running with no audio device',
+        S.voiceCount() === 0, S.voiceCount());
+
+  /* world.js is what classifies a save, so it must never be missing */
+  check('the save rule has exactly one home (world.js is reachable)',
+        !!mod.WorldRef, !!mod.WorldRef);
+})();
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n');
 process.exit(fail ? 1 : 0);

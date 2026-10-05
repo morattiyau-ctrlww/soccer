@@ -22,7 +22,8 @@ var CFG = {
   REACH_Y: 1.0,
 
   /* Real geometry, in metres. world.js must agree — there is a test for it.  */
-  GOAL_W: 7.32, GOAL_H: 2.44, POST_R: 0.06, BALL_R: 0.11
+  GOAL_W: 7.32, GOAL_H: 2.44, POST_R: 0.06, BALL_R: 0.11,
+  PITCH_SPOT_M: 11.0            /* the penalty spot, for real ball pace     */
 };
 /* The woodwork band is a real collision, not a magic number: it is the post
    radius plus the ball radius, expressed in goal units. A shot counts as off
@@ -47,6 +48,17 @@ var DIFF = {
 
 /* ============================== LOGIC ==================================== */
 /* Pure functions — no DOM, no audio. Exported for node tests.             */
+
+/* LOGIC shares one rule with the 3D world model: how a save is classified.
+   world.js is loaded before this file in the browser, and required directly
+   under node, so that rule has exactly one home and cannot drift. The
+   fallback only exists so a missing world.js degrades instead of crashing;
+   the tests assert that we are never actually running without it.          */
+var WorldRef = (typeof WORLD !== 'undefined') ? WORLD
+             : (typeof require === 'function'
+                 ? (function(){ try { return require('./world.js'); } catch (e){ return null; } })()
+                 : null);
+
 var LOGIC = (function(){
 
   /* Placement error. Weak shots are tame but slow; over-hit shots spray.
@@ -173,7 +185,7 @@ var LOGIC = (function(){
     var y = clamp(aim.y + ey - Math.max(0, power - CFG.SWEET) * 0.10, 0, 1.6);
     var speed = lerp(1.35, 0.72, power);         /* 0..1 flight-time scale  */
 
-    var verdict = 'goal', hit = null;
+    var verdict = 'goal', hit = null, saveType = null;
     var reach = reachAt(diff, power);
     var ax = Math.abs(x), ay = Math.abs(y);
 
@@ -190,11 +202,20 @@ var LOGIC = (function(){
       if (dx <= reach.x && dy <= reach.y){
         verdict = 'saved';
         hit = y < 0.35 ? 'low' : (y > 0.95 ? 'high' : 'mid');
+        /* How he stopped it is a rule, not a flourish: a firm hand on a soft
+           ball holds it, a full stretch or a rocket comes back out. The ball
+           you watch fly away is the ball the rules parried.                 */
+        saveType = WorldRef
+          ? WorldRef.saveTypeFor(x - keeper.x, y - keeper.y, reach, power)
+          : 'deflect';
       }
     }
 
-    return { x: x, y: y, verdict: verdict, hit: hit, power: power,
-             speed: speed, reach: reach,
+    return { x: x, y: y, verdict: verdict, hit: hit, saveType: saveType,
+             power: power, speed: speed, reach: reach,
+             /* the ball's real pace across the line, in m/s: the number the
+                audio and the parry both read from */
+             pace: CFG.PITCH_SPOT_M / (CFG.FLIGHT * speed),
              accuracy: 1 - (Math.abs(ex) + Math.abs(ey)) / 0.2 };
   }
 
@@ -221,88 +242,403 @@ var LOGIC = (function(){
 })();
 
 if (typeof module !== 'undefined' && module.exports){
-  module.exports = { LOGIC: LOGIC, DIFF: DIFF, CFG: CFG };
+  module.exports = { LOGIC: LOGIC, DIFF: DIFF, CFG: CFG, WorldRef: WorldRef };
 }
-/* ---------------------------- audio engine ------------------------------ */
+/* ---------------------------- audio engine ------------------------------
+   One graph, three buses and a limiter on the end, because a shootout fires
+   several sounds at the same instant (ball, net, crowd, whistle) and the old
+   build wired every voice straight to the output, where they clipped.
+
+       voice -> bus gain -> glue compressor -> limiter -> master -> output
+
+   Every noise voice is band-limited and plays off one pre-baked buffer instead
+   of allocating a fresh white-noise burst per call, so there is no hiss and no
+   garbage-churn during a burst of events. AUDIO below is the mix spec: plain
+   data, so the tests can check the headroom without an AudioContext.       */
+var AUDIO = {
+  master: 0.85,                        /* the player-facing volume          */
+  /* the wall: fast, hard, and after the glue so it only ever catches peaks */
+  limiter: { threshold: -1.5, knee: 0, ratio: 20, attack: 0.003, release: 0.10 },
+  /* the glue: gentle, so the mix breathes instead of pumping */
+  glue:    { threshold: -14, knee: 6, ratio: 3, attack: 0.008, release: 0.25 },
+  buses:   { sfx: 1.00, crowd: 0.90, ui: 0.55 },
+  /* every voice's own peak amplitude: all below 1, sum caught downstream */
+  peak: { kick: 0.60, click: 0.26, thud: 0.34, net: 0.40, slap: 0.52,
+          palm: 0.30, tock: 0.34, post: 0.36, whistle: 0.32, breath: 0.07,
+          cheer: 0.60, roar: 0.30, groan: 0.26, charge: 0.14 },
+  /* the mix is high-passed to drop DC/rumble and rolled off to kill fizz */
+  hp: 32, lp: 16000,
+  /* no noise voice may reach outside this band: it is why nothing hisses */
+  noiseBand: { lo: 180, hi: 5200 },
+  maxVoices: 24,                       /* a burst cannot pile up unboundedly */
+  fadeMs: 90                           /* mute ramps, so toggling never pops */
+};
+
 var Sound = (function(){
-  var ctx = null, on = true, crowdNode = null, crowdGain = null;
+  var ctx = null, on = true, graph = null, voices = 0;
+  var whiteBuf = null, pinkBuf = null, crowdSrc = null, crowdVoices = 0;
 
   function ac(){
     if (ctx) return ctx;
+    /* node has no Web Audio: every voice degrades to a no-op, which is what
+       lets the mix spec and the busiest sound paths be tested headlessly   */
+    if (typeof window === 'undefined') return null;
     var AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return null;
     ctx = new AC();
     return ctx;
   }
-  function resume(){ var c = ac(); if (c && c.state === 'suspended') c.resume(); }
-  function now(){ return ac().currentTime; }
 
-  function tone(freq, dur, type, vol, slideTo){
-    if (!on) return; var c = ac(); if (!c) return;
-    var o = c.createOscillator(), g = c.createGain();
-    o.type = type || 'sine'; o.frequency.setValueAtTime(freq, now());
-    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, now() + dur);
-    g.gain.setValueAtTime(0.0001, now());
-    g.gain.exponentialRampToValueAtTime(vol || 0.25, now() + 0.012);
-    g.gain.exponentialRampToValueAtTime(0.0001, now() + dur);
-    o.connect(g); g.connect(c.destination); o.start(); o.stop(now() + dur + 0.03);
+  /* Build the chain once: nothing may be scheduled before the context exists,
+     and nothing may reach `destination` except the master gain. */
+  function build(){
+    if (graph || !ac()) return graph;
+    var c = ctx;
+    graph = { bus: {} };
+
+    var hp = c.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = AUDIO.hp; hp.Q.value = 0.7;
+    var lp = c.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = AUDIO.lp; lp.Q.value = 0.5;
+
+    var glue = c.createDynamicsCompressor();
+    glue.threshold.value = AUDIO.glue.threshold;
+    glue.knee.value = AUDIO.glue.knee;
+    glue.ratio.value = AUDIO.glue.ratio;
+    glue.attack.value = AUDIO.glue.attack;
+    glue.release.value = AUDIO.glue.release;
+
+    var lim = c.createDynamicsCompressor();
+    lim.threshold.value = AUDIO.limiter.threshold;
+    lim.knee.value = AUDIO.limiter.knee;
+    lim.ratio.value = AUDIO.limiter.ratio;
+    lim.attack.value = AUDIO.limiter.attack;
+    lim.release.value = AUDIO.limiter.release;
+
+    var master = c.createGain();
+    master.gain.value = on ? AUDIO.master : 0;
+
+    hp.connect(glue); glue.connect(lim); lim.connect(lp); lp.connect(master);
+    master.connect(c.destination);
+    graph.in = hp; graph.master = master;
+
+    ['sfx', 'crowd', 'ui'].forEach(function(name){
+      var b = c.createGain();
+      b.gain.value = AUDIO.buses[name];
+      b.connect(hp);
+      graph.bus[name] = b;
+    });
+    return graph;
   }
-  function noise(dur, vol, filterHz, q){
-    if (!on) return; var c = ac(); if (!c) return;
-    var len = Math.max(1, Math.floor(c.sampleRate * dur));
-    var buf = c.createBuffer(1, len, c.sampleRate), d = buf.getChannelData(0);
-    for (var i = 0; i < len; i++){
-      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2);
+
+  function resume(){ if (ac() && ctx.state === 'suspended') ctx.resume(); }
+  function now(){ return ac().currentTime + 0.001; }
+
+  /* ---- noise, baked once ------------------------------------------------
+     One white buffer for transients, one smoothed ("pink-ish") buffer for
+     everything breathy. Both are band-limited by the voices that use them, so
+     no sound can ever put raw full-spectrum noise into the mix.            */
+  function bake(){
+    if (whiteBuf || !ac()) return;
+    var c = ctx, sr = c.sampleRate, len = Math.floor(sr * 2), i, x, l1 = 0, l2 = 0;
+    whiteBuf = c.createBuffer(1, len, sr);
+    var w = whiteBuf.getChannelData(0);
+    for (i = 0; i < len; i++) w[i] = Math.random() * 2 - 1;
+    pinkBuf = c.createBuffer(1, len, sr);
+    var p = pinkBuf.getChannelData(0);
+    for (i = 0; i < len; i++){
+      x = w[i];
+      l1 += (x - l1) * 0.085;      /* two poles: a gentle -6 dB/oct tilt */
+      l2 += (l1 - l2) * 0.085;
+      p[i] = Math.max(-1, Math.min(1, l2 * 3.1));
     }
-    var src = c.createBufferSource(); src.buffer = buf;
-    var f = c.createBiquadFilter(); f.type = 'bandpass';
-    f.frequency.value = filterHz || 900; f.Q.value = q || 0.8;
-    var g = c.createGain(); g.gain.value = vol || 0.2;
-    src.connect(f); f.connect(g); g.connect(c.destination); src.start();
   }
+
+  /* ---- primitives -------------------------------------------------------- */
+
+  /* an envelope that starts from silence linearly (no click) and decays
+     exponentially (natural tail), instead of jumping from 1e-4 */
+  function env(param, t0, peak, atk, dec, dur){
+    param.cancelScheduledValues(t0);
+    param.setValueAtTime(0.0001, t0);
+    param.linearRampToValueAtTime(peak, t0 + atk);
+    param.exponentialRampToValueAtTime(Math.max(0.0004, peak * 0.30), t0 + atk + dec);
+    param.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  }
+
+  function track(node){
+    voices++;
+    node.onended = function(){
+      voices--;
+      if (voices < 0) voices = 0;
+      try { node.disconnect(); } catch (e){}
+    };
+    return node;
+  }
+
+  function live(){ return on && !!ac() && !!build() && voices < AUDIO.maxVoices; }
+  function busOf(name){
+    var b = build();
+    return b ? b.bus[name || 'sfx'] : null;
+  }
+
+  /* one band-limited noise voice; `hi` sweeps down to `lo` over its life */
+  function noiseVoice(o){
+    if (!live()) return null;
+    var c = ctx, dest = busOf(o.bus);
+    var t0 = now() + (o.delay || 0);
+    var src = c.createBufferSource();
+    src.buffer = (o.colour === 'pink') ? pinkBuf : whiteBuf;
+    src.loop = o.dur > 1.8;
+    var f = c.createBiquadFilter();
+    f.type = o.type || 'bandpass';
+    f.Q.value = o.q === undefined ? 0.8 : o.q;
+    var hi = Math.min(o.hi || 1200, AUDIO.noiseBand.hi);
+    var lo = Math.max(o.lo || 400, AUDIO.noiseBand.lo);
+    f.frequency.setValueAtTime(hi, t0);
+    if (lo !== hi) f.frequency.exponentialRampToValueAtTime(lo, t0 + o.dur * 0.8);
+    var vg = c.createGain();
+    env(vg.gain, t0, o.peak, o.atk === undefined ? 0.006 : o.atk, o.dur * 0.35, o.dur);
+    src.connect(f); f.connect(vg); vg.connect(dest);
+    src.start(t0); src.stop(t0 + o.dur + 0.05);
+    /* a ruffle: mesh and cloth flutter rather than hiss */
+    if (o.flutter){
+      var lfo = c.createOscillator(), lg = c.createGain();
+      lfo.type = 'sine'; lfo.frequency.value = o.flutter;
+      lg.gain.value = o.flutterDepth === undefined ? 0.30 : o.flutterDepth;
+      lfo.connect(lg); lg.connect(vg.gain);
+      lfo.start(t0); lfo.stop(t0 + o.dur + 0.05);
+      track(lfo);
+    }
+    return track(src);
+  }
+
+  /* one filtered tone voice, with an optional pitch sweep and vibrato */
+  function toneVoice(o){
+    if (!live()) return null;
+    var c = ctx, dest = busOf(o.bus);
+    var t0 = now() + (o.delay || 0);
+    var osc = c.createOscillator();
+    osc.type = o.type || 'sine';
+    osc.frequency.setValueAtTime(o.from, t0);
+    if (o.to && o.to !== o.from){
+      osc.frequency.exponentialRampToValueAtTime(Math.max(1, o.to), t0 + o.dur);
+    }
+    var vg = c.createGain();
+    env(vg.gain, t0, o.peak, o.atk === undefined ? 0.004 : o.atk, o.dur * 0.3, o.dur);
+    var tail = osc;
+    if (o.lp){
+      var f = c.createBiquadFilter();
+      f.type = 'lowpass'; f.Q.value = 0.6;
+      f.frequency.value = Math.min(o.lp, AUDIO.lp);
+      osc.connect(f); tail = f;
+    }
+    tail.connect(vg); vg.connect(dest);
+    osc.start(t0); osc.stop(t0 + o.dur + 0.05);
+    if (o.vib){
+      var lfo = c.createOscillator(), lg = c.createGain();
+      lfo.type = o.vibType || 'sine'; lfo.frequency.value = o.vib;
+      lg.gain.value = o.vibDepth || 60;
+      lfo.connect(lg); lg.connect(osc.frequency);
+      lfo.start(t0); lfo.stop(t0 + o.dur + 0.05);
+      track(lfo);
+    }
+    return track(osc);
+  }
+
+  /* ---- the crowd bed ----------------------------------------------------
+     A looped pink buffer under a slow lowpass, so the crowd is a body of air
+     rather than a hiss, plus a roar band the cheers swell through.         */
+  var crowd = null;
   function crowdStart(){
-    if (!on) return; var c = ac(); if (!c || crowdNode) return;
-    var len = Math.floor(c.sampleRate * 2), buf = c.createBuffer(1, len, c.sampleRate);
-    var d = buf.getChannelData(0), last = 0;
-    for (var i = 0; i < len; i++){
-      last = (last + (Math.random() * 2 - 1) * 0.06) * 0.985; d[i] = last;
-    }
-    crowdNode = c.createBufferSource(); crowdNode.buffer = buf; crowdNode.loop = true;
-    crowdGain = c.createGain(); crowdGain.gain.value = 0.05;
-    crowdNode.connect(crowdGain); crowdGain.connect(c.destination); crowdNode.start();
+    if (!on || !ac() || !build() || crowdSrc) return;
+    bake();
+    var c = ctx;
+    crowdSrc = c.createBufferSource();
+    crowdSrc.buffer = pinkBuf; crowdSrc.loop = true;
+    var f = c.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.value = 900; f.Q.value = 0.7;
+    var swell = c.createGain();
+    swell.gain.value = 0.045;                       /* the idle murmur */
+    var roar = c.createBiquadFilter();
+    roar.type = 'bandpass'; roar.frequency.value = 460; roar.Q.value = 0.9;
+    var roarG = c.createGain(); roarG.gain.value = 0.0;
+    crowdSrc.connect(f); f.connect(swell); swell.connect(busOf('crowd'));
+    swell.connect(roar); roar.connect(roarG); roarG.connect(busOf('crowd'));
+    /* a slow wander, so the bed is never static */
+    var lfo = c.createOscillator(), lg = c.createGain();
+    lfo.type = 'sine'; lfo.frequency.value = 0.07; lg.gain.value = 0.012;
+    lfo.connect(lg); lg.connect(swell.gain);
+    crowdSrc.start(); lfo.start();
+    crowd = { swell: swell, roar: roarG };
   }
-  function crowd(vol, ramp){
-    if (!on || !crowdGain) return;
-    crowdGain.gain.cancelScheduledValues(now());
-    crowdGain.gain.setValueAtTime(crowdGain.gain.value, now());
-    crowdGain.gain.linearRampToValueAtTime(vol, now() + (ramp || 0.25));
+
+  function crowdLevel(vol, ramp, roar){
+    if (!crowd || !on) return;
+    var t0 = now();
+    crowd.swell.gain.cancelScheduledValues(t0);
+    crowd.swell.gain.setValueAtTime(crowd.swell.gain.value, t0);
+    crowd.swell.gain.linearRampToValueAtTime(vol, t0 + (ramp || 0.25));
+    if (roar !== undefined){
+      crowd.roar.gain.cancelScheduledValues(t0);
+      crowd.roar.gain.setValueAtTime(crowd.roar.gain.value, t0);
+      crowd.roar.gain.linearRampToValueAtTime(roar, t0 + (ramp || 0.25));
+    }
   }
 
   return {
-    set: function(v){ on = v; if (!on && crowdGain) crowd(0.0, 0.1); },
+    set: function(v){
+      on = v;
+      if (!on) crowdLevel(0.0, 0.15, 0.0);
+      var b = build();
+      /* ramp the master rather than cutting it, so tails fade instead of pop */
+      if (b && ac()){
+        var t0 = now();
+        b.master.gain.cancelScheduledValues(t0);
+        b.master.gain.setValueAtTime(b.master.gain.value, t0);
+        b.master.gain.linearRampToValueAtTime(on ? AUDIO.master : 0,
+                                              t0 + AUDIO.fadeMs / 1000);
+      }
+    },
     enabled: function(){ return on; },
-    wake: function(){ resume(); crowdStart(); },
+    wake: function(){ resume(); bake(); build(); crowdStart(); },
+    voiceCount: function(){ return voices; },
+
+    /* -- the ball off the boot: a low body thump, a leather click and a short
+          slap of air. Crisp, and never a bare sine blip.                   */
     kick: function(power){
-      tone(lerp(120, 70, power), 0.16, 'sine', 0.30, lerp(60, 38, power));
-      noise(0.09, 0.20 * lerp(0.7, 1.2, power), 1500, 0.7);
+      power = clamp(power || 0, 0, 1);
+      bake(); if (!live()) return;
+      toneVoice({ from: lerp(178, 128, power), to: lerp(56, 42, power),
+                  type: 'sine', peak: AUDIO.peak.kick, dur: 0.20, atk: 0.004 });
+      toneVoice({ from: lerp(96, 74, power), to: 44, type: 'triangle',
+                  peak: AUDIO.peak.thud, dur: 0.13, atk: 0.006, lp: 400 });
+      noiseVoice({ hi: Math.min(3000, AUDIO.noiseBand.hi), lo: 1400, q: 1.1,
+                   peak: AUDIO.peak.click * lerp(0.8, 1.15, power), dur: 0.045 });
     },
-    step: function(){ tone(90, 0.06, 'sine', 0.10, 70); },
-    post: function(){ tone(1250, 0.36, 'triangle', 0.26, 620); tone(1900, 0.2, 'sine', 0.14, 900); },
-    net: function(){ noise(0.16, 0.16, 2600, 0.5); },
-    save: function(){ noise(0.14, 0.22, 500, 0.6); },
+
+    /* a step: soft, low, and only ever a background detail */
+    step: function(){
+      bake();
+      toneVoice({ from: 88, to: 62, type: 'sine', peak: 0.10, dur: 0.09, atk: 0.006 });
+      noiseVoice({ hi: 700, lo: 300, q: 0.7, peak: 0.05, dur: 0.06 });
+    },
+
+    /* -- the net: mesh stretching, not a hiss. Pink noise sweeping down with
+          a fast flutter as the weave ripples, and a soft low "give".       */
+    net: function(speed){
+      bake(); if (!live()) return;
+      var s = clamp((speed || 14) / 26, 0.35, 1);
+      noiseVoice({ colour: 'pink', hi: 1900, lo: 420, q: 0.85,
+                   peak: AUDIO.peak.net * lerp(0.6, 1, s), dur: 0.52,
+                   atk: 0.010, flutter: 34, flutterDepth: 0.10 });
+      noiseVoice({ colour: 'pink', hi: 900, lo: 260, q: 0.6,
+                   peak: AUDIO.peak.net * 0.45, dur: 0.34, atk: 0.016 });
+      toneVoice({ from: 120, to: 70, type: 'sine',
+                  peak: AUDIO.peak.thud * 0.5, dur: 0.16, atk: 0.008, lp: 500 });
+    },
+
+    /* -- a clean catch: leather on glove, then the ball settling into it --- */
+    save: function(){
+      bake(); if (!live()) return;
+      noiseVoice({ hi: AUDIO.noiseBand.hi, lo: 2200, q: 0.7,
+                   peak: AUDIO.peak.slap, dur: 0.055, atk: 0.0015 });
+      noiseVoice({ hi: 1400, lo: 500, q: 0.9, peak: AUDIO.peak.palm,
+                   dur: 0.15, atk: 0.004, colour: 'pink' });
+      toneVoice({ from: 240, to: 150, type: 'sine',
+                  peak: AUDIO.peak.thud, dur: 0.12, atk: 0.003, lp: 700 });
+    },
+    /* -- a parry: harder and drier, a fist on a ball rather than a hold ----- */
+    parry: function(){
+      bake(); if (!live()) return;
+      noiseVoice({ hi: AUDIO.noiseBand.hi, lo: 2600, q: 0.6,
+                   peak: AUDIO.peak.slap * 0.9, dur: 0.042, atk: 0.001 });
+      noiseVoice({ hi: 1800, lo: 800, q: 1.4, peak: AUDIO.peak.tock,
+                   dur: 0.10, atk: 0.002 });
+      toneVoice({ from: 620, to: 300, type: 'triangle',
+                  peak: AUDIO.peak.tock * 0.5, dur: 0.09, atk: 0.002, lp: 1600 });
+    },
+
+    /* -- a bell of a post: inharmonic, metallic, and gone ------------------ */
+    post: function(){
+      bake(); if (!live()) return;
+      noiseVoice({ hi: 3600, lo: 900, q: 1.6, peak: AUDIO.peak.post,
+                   dur: 0.36, atk: 0.001 });
+      toneVoice({ from: 620, to: 596, type: 'triangle',
+                  peak: AUDIO.peak.post * 0.55, dur: 0.42, atk: 0.002 });
+      toneVoice({ from: 1174, to: 1130, type: 'sine',
+                  peak: AUDIO.peak.post * 0.30, dur: 0.24, atk: 0.002 });
+      toneVoice({ from: 1908, to: 1855, type: 'sine',
+                  peak: AUDIO.peak.post * 0.18, dur: 0.15, atk: 0.002 });
+    },
+
+    /* -- the referee: a pea whistle. Two near partials with a warble, plus
+          breath, band-limited so it pierces without any fizz.             */
     whistle: function(){
-      tone(2100, 0.28, 'sine', 0.16, 2350);
-      tone(2650, 0.26, 'sine', 0.10, 2850);
+      bake(); if (!live()) return;
+      toneVoice({ from: 2330, to: 2344, type: 'sine', peak: AUDIO.peak.whistle,
+                  lp: 6000, vib: 24, vibDepth: 70, dur: 0.30, atk: 0.022 });
+      toneVoice({ from: 2960, to: 2972, type: 'sine',
+                  peak: AUDIO.peak.whistle * 0.42, lp: 7000, vib: 29,
+                  vibDepth: 70, dur: 0.28, atk: 0.022 });
+      noiseVoice({ hi: 4200, lo: 2400, q: 0.6, peak: AUDIO.peak.breath,
+                   dur: 0.24, atk: 0.022, colour: 'pink' });
     },
-    groan: function(){ crowd(0.16, 0.12); tone(320, 0.5, 'sawtooth', 0.06, 150); },
+
+    /* -- elation, then a wall of noise: a rising roar over the crowd bed ---- */
     cheer: function(){
-      crowd(0.34, 0.12);
-      noise(0.9, 0.16, 800, 0.4);
-      setTimeout(function(){ crowd(0.06, 0.9); }, 900);
+      bake();
+      crowdLevel(0.40, 0.16, 0.24);
+      noiseVoice({ colour: 'pink', hi: 1500, lo: 500, q: 0.4,
+                   peak: AUDIO.peak.roar, dur: 1.5, atk: 0.10, bus: 'crowd' });
+      /* claps: a scatter of tiny transients, not one long hiss */
+      for (var i = 0; i < 6; i++){
+        noiseVoice({ hi: 3200, lo: 1600, q: 1.2,
+                     peak: AUDIO.peak.cheer * 0.12, dur: 0.05, atk: 0.001,
+                     delay: 0.02 + Math.random() * 0.5, bus: 'crowd' });
+      }
+      setTimeout(function(){ crowdLevel(0.06, 1.1, 0.0); }, 1100);
     },
-    charge: function(p){ tone(lerp(700, 1300, p), 0.03, 'square', 0.05); }
+
+    /* -- a save or a miss: the crowd sighs and the pitch drops ------------- */
+    groan: function(){
+      bake();
+      crowdLevel(0.17, 0.12, 0.05);
+      toneVoice({ from: 330, to: 148, type: 'triangle', peak: AUDIO.peak.groan,
+                  lp: 900, dur: 0.62, atk: 0.05 });
+      toneVoice({ from: 196, to: 96, type: 'sine', peak: AUDIO.peak.groan * 0.5,
+                  lp: 600, dur: 0.55, atk: 0.06 });
+      setTimeout(function(){ crowdLevel(0.06, 1.0, 0.0); }, 800);
+    },
+
+    /* the power bar: a soft tick on its own quiet bus, low-passed. The old
+       build used a bare square wave at 0.05 — the harshest thing in the mix. */
+    charge: function(p){
+      bake();
+      toneVoice({ from: lerp(660, 1180, clamp(p, 0, 1)), type: 'triangle',
+                  peak: AUDIO.peak.charge, dur: 0.05, atk: 0.004, lp: 2600,
+                  bus: 'ui' });
+    }
   };
 })();
+
+/* ------------------------- physical event hook ---------------------------- */
+/* The renderers call this the instant something actually touches something, so
+   the sound is never played before the picture shows it: the net swish lands
+   on the frame the mesh ripples, not the frame the verdict was decided.     */
+function ballEvent(kind, info){
+  var speed = info && info.speed;
+  if (kind === 'net') Sound.net(speed);
+  else if (kind === 'post') Sound.post();
+  else if (kind === 'ground' && speed > 3) Sound.step();
+}
+
+/* the audio engine is defined below the LOGIC export, so its own keys are
+   attached here — where AUDIO and Sound are certain to exist */
+if (typeof module !== 'undefined' && module.exports){
+  module.exports.AUDIO = AUDIO;
+  module.exports.Sound = Sound;
+}
 
 /* ------------------------------- DOM refs ------------------------------- */
 var D = {};
@@ -350,7 +686,10 @@ var S = {
   shot: null,
   flight: { t: 0, dur: 0.62 },
   ball: { x: 0, y: 0, sx: 0, sy: 0, r: 9, spin: 0, trail: [] },
-  keeper: { x: 0, y: 0.30, t: 0., px: 0, py: 0.30, pose: 'idle' },
+  /* the keeper's position on the line. His *animation state* is not stored
+     here: it is derived from the world model on demand (see WORLD.keeperState),
+     so there is exactly one answer to "what is he doing" */
+  keeper: { x: 0, y: 0.30, t: 0., px: 0, py: 0.30 },
   fx: [],
   shake: 0,
   time: 0,
@@ -482,18 +821,11 @@ function shootPenalty(){
   var g = geometry();
   S.ball.trail.length = 0;
   S.ball.x = g.cx; S.ball.y = g.ballRestY; S.ball.spin = 0;
-  S.keeper.pose = 'idle'; S.keeper.x = 0; S.keeper.y = 0.30;
+  S.keeper.x = 0; S.keeper.y = 0.30;
   S.keeper.t = 0;
 
   Sound.kick(power);
   S.shake = (S.reduce ? 0 : 7) * power;
-}
-
-function keeperReact(){
-  var k = S.plan;
-  S.keeper.pose = 'diving';
-  S.keeper.targetX = k.x;
-  S.keeper.targetY = k.y;
 }
 
 function endShot(){
@@ -512,16 +844,26 @@ function endShot(){
     S.goals++;
     S.streak++;
     S.best = Math.max(S.best, S.streak);
-    Sound.net(); Sound.cheer();
+    Sound.cheer();
     burst(netImpactPoint(), 46, ['#38ef7d', '#ffd166', '#8fd3ff', '#ffffff']);
     var ip = netImpactPoint();
     S.fx.push({ kind: 'netRipple', t: 0, px: ip.x, py: ip.y });
+    /* the swish belongs to the moment the mesh is struck. The 3D renderer
+       calls ballEvent('net') when its ball reaches the net; the flat renderer
+       has no ball physics, so its ripple IS the impact. */
+    if (!(Renderer3D && Renderer3D.active())) Sound.net(S.shot.pace);
   } else {
     S.streak = 0;
     if (v === 'post'){ Sound.post(); burst(netImpactPoint(), 18, ['#ffd166', '#ffffff']); }
-    else if (v === 'saved'){ Sound.save(); Sound.groan(); }
-    else { Sound.groan(); }
+    else if (v === 'saved'){
+      if (S.shot.saveType === 'catch') Sound.save(); else Sound.parry();
+      Sound.groan();
+    } else { Sound.groan(); }
   }
+
+  /* what he does about it is not stored anywhere: the world model derives
+     catch / deflect / conceded from this verdict and the plan he committed to,
+     so the pose he plays is the save that was scored against him */
   if (!S.reduce && (v === 'post' || v === 'saved')) S.shake = 5;
 
   showBanner(label, cn, cls);
@@ -542,7 +884,8 @@ function nextRound(){
   if (S.shotIndex >= CFG.ROUNDS){ finishGame(); }
   else {
     S.phase = 'aim'; S.shot = null; S.plan = null;
-    S.keeper.pose = 'idle'; S.best = Math.max(S.best, S.streak);
+    S.best = Math.max(S.best, S.streak);
+    S.ball.vx = undefined; S.ball.vy = undefined; S.ball.after = undefined;
     if (Renderer3D && Renderer3D.active()) Renderer3D.reset();
     saveBest();
   }
@@ -678,7 +1021,8 @@ function newGame(){
   S.phase = 'aim'; S.shot = null; S.plan = null;
   S.flight.t = 0; S.flight.done = false;
   S.wait = 0; S.timeScale = 1;
-  S.keeper.pose = 'idle'; S.keeper.x = 0; S.keeper.y = 0.30;
+  S.keeper.x = 0; S.keeper.y = 0.30;
+  S.ball.vx = undefined; S.ball.vy = undefined; S.ball.after = undefined;
   S.aim = { x: 0, y: 0.34 };
   var g0 = geometry();
   S.ball.x = g0.cx; S.ball.y = g0.ballRestY;
@@ -689,7 +1033,47 @@ function newGame(){
   D.powerWrap.classList.remove('on');
   renderShots(); updateHud(false);
 }
-/* ------------------------------ simulation ------------------------------ */
+/* ------------------------- the flat renderer's aftermath ------------------
+   The 2D fallback has no world-space physics, so the same outcomes are played
+   in screen space. The states and the verdicts are identical; only the units
+   differ. This is why the fallback still shows a ball that ends up in the net
+   rather than a ball that freezes on the goal line.                       */
+function updateAftermath2D(dt){
+  var b = S.ball, g = geometry();
+  if (!S.shot) return;
+  var v = S.shot.verdict;
+  if (b.after === undefined) b.after = 0;
+  b.after += dt;
+
+  /* a caught ball is in his hands: the flat keeper's gloves are at the top of
+     his catch pose (92% of body height above his feet, body = 74% of the goal),
+     so the ball is placed on exactly that point rather than near it */
+  if (v === 'saved' && S.shot.saveType === 'catch'){
+    var feetY = g.goalBottomY + 1 - S.keeper.py * g.goalH * 0.42;
+    b.x = g.cx + S.keeper.px;
+    b.y = feetY - (g.goalH * 0.74) * 0.92;
+    b.r = g.spotR * 0.82;
+    return;
+  }
+  if (b.vx === undefined){
+    b.vx = 0; b.vy = 0;
+    var sp = 0.16 * g.goalHalf;
+    if (v === 'goal'){ b.vx = 0; b.vy = sp * 0.30; }              /* into the net */
+    else if (v === 'post'){ b.vx = (S.shot.x < 0 ? -1 : 1) * sp * 1.5; b.vy = -sp * 0.5; }
+    else if (v === 'saved'){ b.vx = (S.shot.x < 0 ? -1 : 1) * sp * 2.2; b.vy = -sp * 0.9; }
+    else { b.vx = (S.shot.x < 0 ? -1 : 1) * sp * 2.6; b.vy = (v === 'over' ? -sp * 0.7 : sp * 0.4); }
+  }
+  b.vy += dt * g.goalH * 2.6;                 /* gravity, in screen units */
+  b.vx *= (1 - dt * 1.2); b.vy *= (1 - dt * 0.6);
+  b.x += b.vx * dt; b.y += b.vy * dt;
+  /* the grass stops it: it settles inside the net instead of in mid-air */
+  var floor = g.goalBottomY + (v === 'goal' ? g.goalH * 0.06 : 0);
+  if (b.y > floor){ b.y = floor; b.vy = 0; b.vx *= 0.86; }
+  b.r = g.spotR * 0.82;
+  b.spin += dt * 3;
+}
+
+/* ---------------------------- simulation -------------------------------- */
 function updateFlight(dt){
   var f = S.flight;
   if (f.t >= 1) return;
@@ -709,12 +1093,20 @@ function updateFlight(dt){
   if (f.t >= 1 && !f.done){ f.done = true; endShot(); }
 }
 
+function keeperStateNow(){
+  /* the one answer to "what is he doing", asked of the world model */
+  return WorldRef.keeperState({
+    phase: S.phase, plan: S.plan, t: S.flight.t, dur: S.flight.dur,
+    verdict: S.shot ? S.shot.verdict : null,
+    saveType: S.shot ? S.shot.saveType : null
+  }).state;
+}
+
 function updateKeeper(dt){
   var k = S.plan, g = geometry();
   if (!k){ S.keeper.px = 0; S.keeper.py = 0.30; S.keeper.t = 0; return; }
   var delay = k.react / Math.max(S.flight.dur, 0.05);
   var t = clamp((S.flight.t - delay) / Math.max(1 - delay, 0.15), 0, 1);
-  if (t > 0 && S.keeper.pose === 'idle') keeperReact();
   var p = easeOut(t);
   S.keeper.t = p;
   S.keeper.px = lerp(0, k.x, p) * g.goalHalf;
@@ -761,6 +1153,9 @@ function frame(ts){
 
     updatePower(dt);
     if (S.phase === 'flying'){ updateFlight(dt); updateKeeper(dt); }
+    else if (S.phase === 'result' && !(Renderer3D && Renderer3D.active())){
+      updateAftermath2D(dt);
+    }
     updateFx(dt);
     updateAiHud();
 
@@ -813,6 +1208,21 @@ function scriptedShot(want){
   return S.shot;
 }
 
+/* a scripted save of a given kind: central and soft enough that he holds it,
+   or out at the fingertips where he can only push it away */
+function scriptedSave(kind){
+  for (var i = 0; i < 40; i++){
+    S.aim = { x: (i % 4) * 0.10 - 0.15, y: 0.30 };
+    S.power = 0.22;
+    shootPenalty();
+    if (S.shot.verdict === 'saved' && S.shot.saveType === kind) return S.shot;
+    S.busy = false; S.phase = 'aim'; S.wait = 0;
+    S.shot = null; S.plan = null;
+    S.history.pop();
+  }
+  return S.shot;
+}
+
 function probe(){
   return {
     ready3d: !!(Renderer3D && Renderer3D.active()),
@@ -827,6 +1237,12 @@ function probe(){
     title: D.ovTitle.textContent,
     three: typeof window.THREE !== 'undefined',
     err3d: window.__err3d || null,
+    /* a shot's own facts, so a capture can prove what the physics did */
+    saveType: S.shot ? S.shot.saveType : null,
+    pace: S.shot ? +S.shot.pace.toFixed(1) : null,
+    keeperPose: keeperStateNow(),
+    audio: { on: Sound.enabled(), voices: Sound.voiceCount(),
+             err: window.__audioErr || null },
     r3: (Renderer3D && Renderer3D.active()) ? Renderer3D.state() : null
   };
 }
@@ -898,11 +1314,33 @@ function capture(){
     });
     return;
   }
+  if (mode === 'audio'){
+    /* Build the real graph in a real browser and fire everything at once —
+       the overlapping case is exactly what used to clip. */
+    whenStadium(function(){
+      var err = null;
+      try {
+        Sound.wake();
+        Sound.kick(0.7); Sound.net(20); Sound.save(); Sound.parry();
+        Sound.post(); Sound.whistle(); Sound.cheer(); Sound.groan();
+        Sound.charge(0.5); Sound.step();
+        for (var i = 0; i < 6; i++){
+          Sound.kick(0.9); Sound.net(26); Sound.cheer(); Sound.whistle();
+        }
+      } catch (e){ err = String((e && e.message) || e); }
+      window.__audioErr = err;
+      report('CAP audio');
+      frozen = true;
+    });
+    return;
+  }
   if (mode === 'rest') return;
 
   whenStadium(function(){
-    if (mode === 'goal' || mode === 'save'){
-      scriptedShot(mode === 'goal' ? 'goal' : 'saved');
+    if (mode === 'goal' || mode === 'save' || mode === 'catch' || mode === 'parry'){
+      if (mode === 'goal') scriptedShot('goal');
+      else if (mode === 'save') scriptedShot('saved');
+      else scriptedSave(mode === 'catch' ? 'catch' : 'deflect');
       var guard = 0;
       while (S.phase !== 'result' && guard++ < 400) stepSim(1);
       stepSim(14);
@@ -921,7 +1359,8 @@ function capture(){
        let the renderer catch its animations up first, then hold everything */
     if (Renderer3D && Renderer3D.active()){
       var spins = (mode === 'flight') ? Math.abs(arg)
-                : (mode === 'goal' || mode === 'save' || mode === 'outcome') ? 45
+                : (mode === 'goal' || mode === 'save' || mode === 'outcome' ||
+                   mode === 'catch' || mode === 'parry') ? 45
                 : 28;
       for (var t = 0; t < spins; t++) Renderer3D.tick(1 / 60);
     }
